@@ -4,11 +4,9 @@ from loguru import logger
 from wechatpy.enterprise import WeChatClient
 
 
-
 def send_wechat_message(
     user_ids, title, content=None, corp_id=None, secret=None, agent_id=None
 ):
-
 
     if not corp_id or not secret or not agent_id:
         corp_id = os.getenv("CORP_ID")
