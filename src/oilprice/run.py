@@ -1,7 +1,7 @@
 import yaml
 from loguru import logger
-from parse_html import parse_oil_price
-from wechat_notify import send_wechat_message
+from .parse_html import parse_oil_price
+from .wechat_notify import send_wechat_message
 
 
 def send_oilprice_message(config):
