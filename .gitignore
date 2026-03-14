@@ -2,7 +2,13 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Environment config (contains secrets)
+.env
+
+# Old config format
 *.yaml
+!config.yaml.example
 
 # C extensions
 *.so

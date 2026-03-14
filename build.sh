@@ -1,0 +1,1 @@
+poetry run python -m nuitka --onefile --output-dir=dist --output-filename=oilprice ./src/main.py

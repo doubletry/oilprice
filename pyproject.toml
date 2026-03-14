@@ -1,27 +1,34 @@
 [project]
 name = "oilprice"
-version = "0.1.0"
-description = ""
+version = "1.0.0"
+description = "国内油价监控与企业微信推送工具"
 authors = [
-    {name = "alblue",email = "hslixdu@outlook.com"}
+    {name = "alblue", email = "hslixdu@outlook.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.9,<3.14"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "beautifulsoup4 (>=4.13.3,<5.0.0)",
     "wechatpy[cryptography] (>=1.8.18,<2.0.0)",
     "loguru (>=0.7.3,<0.8.0)",
-    "pyyaml (>=6.0.2,<7.0.0)"
+    "requests (>=2.32.0,<3.0.0)",
+    "python-dotenv (>=1.0.0,<2.0.0)",
 ]
 
 [tool.poetry]
 packages = [{include = "oilprice", from = "src"}]
 
+[tool.poetry.scripts]
+oilprice = "oilprice.main:main"
 
 [tool.poetry.group.dev.dependencies]
 black = "^25.1.0"
 isort = "^6.0.1"
+pytest = "^8.0.0"
+pytest-mock = "^3.14.0"
+responses = "^0.25.0"
 pyinstaller = "^6.12.0"
+nuitka = {extras = ["onefile"], version = "^4.0.5"}
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
