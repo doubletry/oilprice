@@ -33,8 +33,11 @@ def load_config(env_path: str | None = None) -> Config:
     if env_path:
         load_dotenv(env_path, override=True)
     else:
-        # 从项目根目录查找 .env
-        load_dotenv(Path(__file__).parent.parent.parent / ".env", override=True)
+        # 优先从当前工作目录查找 .env（兼容打包后的可执行文件）
+        # 其次从项目源码目录查找
+        cwd_env = Path.cwd() / ".env"
+        src_env = Path(__file__).parent.parent.parent / ".env"
+        load_dotenv(cwd_env if cwd_env.exists() else src_env, override=True)
 
     missing = []
     corp_id = os.getenv("CORP_ID", "")

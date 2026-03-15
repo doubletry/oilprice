@@ -1,0 +1,160 @@
+# 发布工作流：创建 tag 时自动测试、构建并发布到 GitHub Releases
+#
+# 触发方式：推送 v* 格式的 tag，例如：
+#   git tag v1.0.0
+#   git push origin v1.0.0
+
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # ──────────────────────────────────────────────
+  # 1. 运行测试（仅在测试通过后才构建）
+  # ──────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Run tests
+        run: poetry run pytest tests/ -v
+
+  # ──────────────────────────────────────────────
+  # 2. 构建可执行文件（Windows + Linux 并行构建）
+  # ──────────────────────────────────────────────
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            artifact_name: oilprice-linux-amd64
+            binary_name: oilprice
+          - os: windows-latest
+            artifact_name: oilprice-windows-amd64.exe
+            binary_name: oilprice.exe
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install dependencies
+        run: poetry install
+
+      # Linux: 安装 Nuitka 所需的系统依赖
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf ccache
+
+      # 使用 Nuitka 构建 onefile 可执行文件
+      - name: Build with Nuitka
+        run: >
+          poetry run python -m nuitka
+          --onefile
+          --output-dir=dist
+          --output-filename=${{ matrix.binary_name }}
+          --assume-yes-for-downloads
+          ./src/main.py
+
+      # 重命名为带平台标识的文件名
+      - name: Rename artifact
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            mv dist/${{ matrix.binary_name }} dist/${{ matrix.artifact_name }}
+          else
+            mv dist/${{ matrix.binary_name }} dist/${{ matrix.artifact_name }}
+            chmod +x dist/${{ matrix.artifact_name }}
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.artifact_name }}
+
+  # ──────────────────────────────────────────────
+  # 3. 创建 GitHub Release 并上传构建产物
+  # ──────────────────────────────────────────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 下载所有构建产物
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: List artifacts
+        run: find artifacts/ -type f
+
+      # 从 tag 生成版本号
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      # 创建 Release 并上传文件
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "v${{ steps.version.outputs.VERSION }}"
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            artifacts/oilprice-linux-amd64/oilprice-linux-amd64
+            artifacts/oilprice-windows-amd64.exe/oilprice-windows-amd64.exe
+          body: |
+            ## 油价监控工具 v${{ steps.version.outputs.VERSION }}
+
+            ### 下载
+            | 平台 | 文件 |
+            |------|------|
+            | Windows (x64) | `oilprice-windows-amd64.exe` |
+            | Linux (x64) | `oilprice-linux-amd64` |
+
+            ### 使用方式
+            1. 下载对应平台的可执行文件
+            2. 在同目录创建 `.env` 配置文件（参考 `.env.example`）
+            3. 运行可执行文件即可推送油价到企业微信
+
+            ```bash
+            # Linux
+            chmod +x oilprice-linux-amd64
+            ./oilprice-linux-amd64
+
+            # Windows
+            oilprice-windows-amd64.exe
+
+            # 仅查看油价不发送
+            ./oilprice-linux-amd64 --dry-run
+            ```

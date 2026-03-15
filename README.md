@@ -132,7 +132,26 @@ poetry run pytest tests/ -v
 # 代码格式化
 poetry run black src/ tests/
 poetry run isort src/ tests/
+
+# 本地构建可执行文件（需要 nuitka）
+poetry run python -m nuitka --onefile --output-dir=dist --output-filename=oilprice ./src/main.py
 ```
+
+## 发布新版本
+
+推送 `v*` 格式的 tag 即可自动触发 CI/CD 流程：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+GitHub Actions 会自动完成：
+1. 运行全部测试
+2. 使用 Nuitka 构建 Windows 和 Linux 的 onefile 可执行文件
+3. 创建 GitHub Release 并上传构建产物
+
+构建完成后可在 [Releases 页面](../../releases) 下载对应平台的可执行文件。
 
 ## 企业微信配置指南
 
