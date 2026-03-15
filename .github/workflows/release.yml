@@ -46,10 +46,8 @@ jobs:
         include:
           - os: ubuntu-22.04
             artifact_name: oilprice-linux-amd64
-            binary_name: oilprice
           - os: windows-latest
             artifact_name: oilprice-windows-amd64.exe
-            binary_name: oilprice.exe
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -72,26 +70,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y patchelf ccache
 
-      # 使用 Nuitka 构建 onefile 可执行文件
-      - name: Build with Nuitka
-        run: >
-          poetry run python -m nuitka
-          --onefile
-          --output-dir=dist
-          --output-filename=${{ matrix.binary_name }}
-          --assume-yes-for-downloads
-          ./src/main.py
-
-      # 重命名为带平台标识的文件名
-      - name: Rename artifact
-        shell: bash
+      # 使用构建脚本构建 onefile 可执行文件
+      - name: Build with Nuitka (Linux)
+        if: runner.os == 'Linux'
         run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            mv dist/${{ matrix.binary_name }} dist/${{ matrix.artifact_name }}
-          else
-            mv dist/${{ matrix.binary_name }} dist/${{ matrix.artifact_name }}
-            chmod +x dist/${{ matrix.artifact_name }}
-          fi
+          chmod +x build.sh
+          bash build.sh ${{ matrix.artifact_name }}
+
+      - name: Build with Nuitka (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\build.ps1 -OutputName ${{ matrix.artifact_name }}
+
+      - name: Make executable (Linux)
+        if: runner.os == 'Linux'
+        run: chmod +x dist/${{ matrix.artifact_name }}
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
