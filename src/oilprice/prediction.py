@@ -36,10 +36,10 @@ _SINA_HQ_URL = "https://hq.sinajs.cn/list=hf_OIL,hf_CL"
 # 新浪财经汇率 API（美元兑人民币）
 _SINA_FX_URL = "https://hq.sinajs.cn/list=fx_susdcny"
 
-# 新浪财经国际期货日K线数据 API（获取历史收盘价）
+# 新浪财经国际期货日K线数据 API（获取历史收盘价，使用 json.php 返回纯 JSON）
 _SINA_KLINE_URL_TPL = (
-    "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/"
-    "var%20_result=/InnerFuturesNewService.getDailyKLine?symbol={symbol}"
+    "https://stock2.finance.sina.com.cn/futures/api/json.php/"
+    "InnerFuturesNewService.getDailyKLine?symbol={symbol}"
 )
 
 # 已知调价参考日期（计算起点）
@@ -230,6 +230,11 @@ def fetch_crude_oil_prices() -> list[CrudeOilPrice]:
 def fetch_exchange_rate() -> float:
     """从新浪财经获取美元兑人民币汇率
 
+    新浪外汇API返回格式（字段以逗号分隔）:
+    "名称/时间,现价,今开,昨收,最高,最低,买价,日期,时间,..."
+    注意: fields[0] 可能是名称(如"美元人民币")或时间(如"22:25:02")，
+    实际汇率值需要在后续字段中查找。
+
     Returns:
         美元兑人民币汇率，获取失败返回默认值
     """
@@ -245,19 +250,37 @@ def fetch_exchange_rate() -> float:
 
         data_str = text.split('"')[1]
         fields = data_str.split(",")
-        if not fields or not fields[0]:
+        if not fields:
             logger.warning("汇率API未返回有效数据")
             return _DEFAULT_EXCHANGE_RATE
 
-        rate = float(fields[0])
-        # 新浪汇率API可能返回百倍数值（如 726.44 表示 7.2644）
-        if rate > 100:
-            rate = rate / 100
+        # 遍历字段查找合理的汇率值（应在 1~100 之间，或百倍值 100~1000）
+        rate = None
+        for field in fields:
+            field = field.strip()
+            if not field:
+                continue
+            try:
+                val = float(field)
+            except ValueError:
+                continue
+            # 合理汇率范围: 直接值 1~15，或百倍值 100~1500
+            if 1.0 <= val <= 15.0:
+                rate = val
+                break
+            elif 100.0 <= val <= 1500.0:
+                rate = val / 100
+                break
+
+        if rate is None:
+            logger.warning(f"汇率API未找到有效汇率值，字段: {fields}")
+            return _DEFAULT_EXCHANGE_RATE
+
         logger.info(f"当前美元兑人民币汇率: {rate:.4f}")
         return rate
 
     except (requests.RequestException, ValueError, IndexError) as e:
-        logger.warning(f"获取汇率失败，使用默认值 {_DEFAULT_EXCHANGE_RATE}: {e}")
+        logger.exception(f"获取汇率失败，使用默认值 {_DEFAULT_EXCHANGE_RATE}")
         return _DEFAULT_EXCHANGE_RATE
 
 
@@ -265,6 +288,9 @@ def fetch_reference_crude_prices(ref_date: date) -> dict[str, float] | None:
     """获取上次调价日期附近的原油收盘价作为基准价
 
     从新浪财经日K线数据中查找距离参考日期最近交易日的收盘价。
+
+    新浪K线API返回JSON数组，每个元素格式:
+    {"day":"2025-01-17","open":"74.00","high":"74.80","low":"73.50","close":"74.50","volume":"1200"}
 
     Args:
         ref_date: 参考日期（上次调价日）
@@ -283,14 +309,21 @@ def fetch_reference_crude_prices(ref_date: date) -> dict[str, float] | None:
             response.encoding = "utf-8"
             text = response.text.strip()
 
-            # 从 JSONP 响应中提取 JSON 数组
-            start_idx = text.find("[")
-            end_idx = text.rfind("]")
-            if start_idx < 0 or end_idx < 0:
-                logger.debug(f"{name}K线数据响应格式异常")
-                continue
+            # 解析JSON响应（json.php返回纯JSON数组）
+            # 兼容处理: 若响应包含JSONP包装则提取JSON部分
+            if text.startswith("["):
+                json_str = text
+            else:
+                start_idx = text.find("[")
+                end_idx = text.rfind("]")
+                if start_idx < 0 or end_idx < 0:
+                    logger.warning(
+                        f"{name}K线数据响应格式异常，无法找到JSON数组。"
+                        f"响应内容前100字符: {text[:100]}"
+                    )
+                    continue
+                json_str = text[start_idx : end_idx + 1]
 
-            json_str = text[start_idx : end_idx + 1]
             data = json.loads(json_str)
 
             if not data:
@@ -303,8 +336,9 @@ def fetch_reference_crude_prices(ref_date: date) -> dict[str, float] | None:
             for entry in data:
                 try:
                     if isinstance(entry, dict):
-                        entry_date_str = entry.get("d", "")
-                        close_str = entry.get("c", "")
+                        # 支持两种key格式: "day"/"close" 或 "d"/"c"
+                        entry_date_str = entry.get("day") or entry.get("d", "")
+                        close_str = entry.get("close") or entry.get("c", "")
                     elif isinstance(entry, list) and len(entry) >= 5:
                         entry_date_str = str(entry[0])
                         close_str = str(entry[4])
@@ -329,7 +363,7 @@ def fetch_reference_crude_prices(ref_date: date) -> dict[str, float] | None:
                 )
 
         except (requests.RequestException, json.JSONDecodeError) as e:
-            logger.warning(f"获取{name}历史K线数据失败: {e}")
+            logger.exception(f"获取{name}历史K线数据失败")
             continue
 
     if ref_prices:

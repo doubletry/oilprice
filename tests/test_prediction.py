@@ -188,11 +188,35 @@ class TestFetchExchangeRate:
 
     @patch("oilprice.prediction.requests.get")
     def test_parse_normal_rate(self, mock_get):
-        """正常解析汇率（直接格式）"""
+        """正常解析汇率（直接格式，第一个字段为汇率）"""
         mock_get.return_value.status_code = 200
         mock_get.return_value.text = (
             'var hq_str_fx_susdcny="7.2644,7.2580,7.2700,7.2500,'
             '0,0,0,7.2500,2025-03-14,10:30:00";'
+        )
+        rate = fetch_exchange_rate()
+        assert 7.0 < rate < 8.0
+        assert rate == pytest.approx(7.2644)
+
+    @patch("oilprice.prediction.requests.get")
+    def test_parse_rate_with_name_prefix(self, mock_get):
+        """解析以名称开头的格式（如"美元人民币,7.2644,..."）"""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.text = (
+            'var hq_str_fx_susdcny="美元人民币,7.2644,7.2580,7.2700,'
+            '7.2500,7.2400,7.2644,2025-03-14 10:30:00,0.0027";'
+        )
+        rate = fetch_exchange_rate()
+        assert 7.0 < rate < 8.0
+        assert rate == pytest.approx(7.2644)
+
+    @patch("oilprice.prediction.requests.get")
+    def test_parse_rate_with_time_prefix(self, mock_get):
+        """解析以时间开头的格式（如"22:25:02,7.2644,..."）"""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.text = (
+            'var hq_str_fx_susdcny="22:25:02,7.2644,7.2580,7.2700,'
+            '7.2500,7.2400,7.2644,2025-03-17,0.0027";'
         )
         rate = fetch_exchange_rate()
         assert 7.0 < rate < 8.0
@@ -241,17 +265,17 @@ class TestFetchReferenceCrudePrices:
 
     @patch("oilprice.prediction.requests.get")
     def test_parse_kline_dict_format(self, mock_get):
-        """正常解析JSONP字典格式的K线数据"""
-        # 模拟 JSONP 响应（字典格式）
-        jsonp_data = (
-            'var _result=(['
-            '{"d":"2025-01-15","o":"73.00","h":"73.80","l":"72.50","c":"73.50","v":"1000"},'
-            '{"d":"2025-01-16","o":"73.50","h":"74.20","l":"73.00","c":"74.00","v":"1100"},'
-            '{"d":"2025-01-17","o":"74.00","h":"74.80","l":"73.50","c":"74.50","v":"1200"}'
-            ']);'
+        """正常解析JSON字典格式的K线数据（day/close 键名）"""
+        # 模拟纯 JSON 响应（json.php 格式）
+        json_data = (
+            '['
+            '{"day":"2025-01-15","open":"73.00","high":"73.80","low":"72.50","close":"73.50","volume":"1000"},'
+            '{"day":"2025-01-16","open":"73.50","high":"74.20","low":"73.00","close":"74.00","volume":"1100"},'
+            '{"day":"2025-01-17","open":"74.00","high":"74.80","low":"73.50","close":"74.50","volume":"1200"}'
+            ']'
         )
         mock_get.return_value.status_code = 200
-        mock_get.return_value.text = jsonp_data
+        mock_get.return_value.text = json_data
 
         result = fetch_reference_crude_prices(date(2025, 1, 17))
 
@@ -262,17 +286,36 @@ class TestFetchReferenceCrudePrices:
             assert price == 74.50  # Close price on Jan 17
 
     @patch("oilprice.prediction.requests.get")
-    def test_finds_nearest_trading_day(self, mock_get):
-        """参考日期非交易日时，使用最近交易日的收盘价"""
-        # Jan 18 is Saturday, should match Jan 17 (Friday)
+    def test_parse_kline_short_key_format(self, mock_get):
+        """兼容解析短键名格式（d/c 键名，老版本JSONP格式）"""
         jsonp_data = (
             'var _result=(['
-            '{"d":"2025-01-16","o":"73.50","h":"74.20","l":"73.00","c":"73.80","v":"1100"},'
+            '{"d":"2025-01-16","o":"73.50","h":"74.20","l":"73.00","c":"74.00","v":"1100"},'
             '{"d":"2025-01-17","o":"74.00","h":"74.80","l":"73.50","c":"74.50","v":"1200"}'
             ']);'
         )
         mock_get.return_value.status_code = 200
         mock_get.return_value.text = jsonp_data
+
+        result = fetch_reference_crude_prices(date(2025, 1, 17))
+
+        assert result is not None
+        assert len(result) > 0
+        for name, price in result.items():
+            assert price == 74.50
+
+    @patch("oilprice.prediction.requests.get")
+    def test_finds_nearest_trading_day(self, mock_get):
+        """参考日期非交易日时，使用最近交易日的收盘价"""
+        # Jan 18 is Saturday, should match Jan 17 (Friday)
+        json_data = (
+            '['
+            '{"day":"2025-01-16","open":"73.50","high":"74.20","low":"73.00","close":"73.80","volume":"1100"},'
+            '{"day":"2025-01-17","open":"74.00","high":"74.80","low":"73.50","close":"74.50","volume":"1200"}'
+            ']'
+        )
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.text = json_data
 
         result = fetch_reference_crude_prices(date(2025, 1, 18))
 
@@ -283,13 +326,13 @@ class TestFetchReferenceCrudePrices:
     @patch("oilprice.prediction.requests.get")
     def test_rejects_distant_dates(self, mock_get):
         """距离参考日期超过5天时不使用"""
-        jsonp_data = (
-            'var _result=(['
-            '{"d":"2025-01-10","o":"73.00","h":"73.80","l":"72.50","c":"73.50","v":"1000"}'
-            ']);'
+        json_data = (
+            '['
+            '{"day":"2025-01-10","open":"73.00","high":"73.80","low":"72.50","close":"73.50","volume":"1000"}'
+            ']'
         )
         mock_get.return_value.status_code = 200
-        mock_get.return_value.text = jsonp_data
+        mock_get.return_value.text = json_data
 
         # ref_date is Jan 20, but data only has Jan 10 (10 days away > 5 day threshold)
         result = fetch_reference_crude_prices(date(2025, 1, 20))
