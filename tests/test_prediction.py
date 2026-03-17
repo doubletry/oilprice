@@ -154,7 +154,7 @@ class TestFetchExchangeRate:
 
     @patch("oilprice.prediction.requests.get")
     def test_parse_hundredths_format(self, mock_get):
-        """解析百分位格式（726.44 → 7.2644）"""
+        """解析百倍格式（726.44 → 7.2644）"""
         mock_get.return_value.status_code = 200
         mock_get.return_value.text = (
             'var hq_str_fx_susdcny="726.44,725.80,727.00,725.00,'
@@ -292,7 +292,7 @@ class TestGeneratePrediction:
     def test_prediction_with_small_change(self, mock_fetch, mock_fx):
         """波动较小时预测搁浅（使用50元/吨阈值）"""
         mock_fx.return_value = 7.20
-        # 0.1%的变化 → 约 0.075美元 → 约 8.6元/吨汽油 < 50元/吨阈值
+        # 0.1%变化 ≈ 74.00×0.001=$0.074/桶 → 约8.6元/吨汽油 < 50元/吨阈值
         mock_fetch.return_value = [
             CrudeOilPrice(name="布伦特", price=74.00, change_pct=0.1, prev_close=73.93),
         ]

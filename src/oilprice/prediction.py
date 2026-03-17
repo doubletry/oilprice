@@ -51,7 +51,7 @@ GASOLINE_YIELD_RATE = 0.45
 
 # 税率
 VAT_RATE = 0.13  # 增值税 13%
-CONSUMPTION_TAX_PER_LITER = 1.52  # 汽油消费税（元/升）
+CONSUMPTION_TAX_PER_LITER = 1.52  # 汽油消费税（元/升，固定税额，不随油价变动）
 URBAN_MAINTENANCE_TAX_RATE = 0.07  # 城市维护建设税（增值税的7%）
 EDUCATION_SURCHARGE_RATE = 0.03  # 教育费附加（增值税的3%）
 LOCAL_EDUCATION_SURCHARGE_RATE = 0.02  # 地方教育费附加（增值税的2%）
@@ -220,7 +220,7 @@ def fetch_exchange_rate() -> float:
             return _DEFAULT_EXCHANGE_RATE
 
         rate = float(fields[0])
-        # 新浪汇率API可能返回百分位数值（如 726.44 表示 7.2644）
+        # 新浪汇率API可能返回百倍数值（如 726.44 表示 7.2644）
         if rate > 100:
             rate = rate / 100
         logger.info(f"当前美元兑人民币汇率: {rate:.4f}")
