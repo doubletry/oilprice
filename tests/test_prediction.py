@@ -16,8 +16,10 @@ from oilprice.prediction import (
     _calculate_retail_price_impact,
     fetch_crude_oil_prices,
     fetch_exchange_rate,
+    fetch_reference_crude_prices,
     generate_prediction,
     get_next_adjustment_date,
+    get_previous_adjustment_date,
 )
 
 
@@ -83,6 +85,50 @@ class TestGetNextAdjustmentDate:
         today = date.today()
         result = get_next_adjustment_date(today)
         assert result >= today
+
+
+class TestGetPreviousAdjustmentDate:
+    """测试上一次调价日期计算"""
+
+    def test_before_reference_date(self):
+        """基准日之前返回 None"""
+        result = get_previous_adjustment_date(date(2025, 1, 10))
+        assert result is None
+
+    def test_on_reference_date(self):
+        """基准日当天返回 None（没有更早的调价日）"""
+        result = get_previous_adjustment_date(date(2025, 1, 17))
+        assert result is None
+
+    def test_day_after_reference(self):
+        """基准日后一天，上次调价日 = 基准日"""
+        result = get_previous_adjustment_date(date(2025, 1, 18))
+        assert result == date(2025, 1, 17)
+
+    def test_mid_cycle(self):
+        """周期中间，上次调价日 = 周期起始日"""
+        # Between Jan 17 and Jan 31
+        result = get_previous_adjustment_date(date(2025, 1, 25))
+        assert result == date(2025, 1, 17)
+
+    def test_on_next_adjustment_date(self):
+        """下一个调价日当天，上次调价日 = 上一周期"""
+        # Jan 31 is adjustment date, previous is Jan 17
+        result = get_previous_adjustment_date(date(2025, 1, 31))
+        assert result == date(2025, 1, 17)
+
+    def test_second_cycle(self):
+        """第二个周期内的上次调价日"""
+        # After Jan 31, previous adjustment = Jan 31
+        result = get_previous_adjustment_date(date(2025, 2, 5))
+        assert result == date(2025, 1, 31)
+
+    def test_result_is_before_today(self):
+        """上次调价日一定在 today 之前"""
+        today = date(2025, 6, 15)
+        result = get_previous_adjustment_date(today)
+        assert result is not None
+        assert result < today
 
 
 class TestFetchCrudeOilPrices:
@@ -190,6 +236,92 @@ class TestFetchExchangeRate:
         assert rate == 7.20
 
 
+class TestFetchReferenceCrudePrices:
+    """测试历史基准价获取"""
+
+    @patch("oilprice.prediction.requests.get")
+    def test_parse_kline_dict_format(self, mock_get):
+        """正常解析JSONP字典格式的K线数据"""
+        # 模拟 JSONP 响应（字典格式）
+        jsonp_data = (
+            'var _result=(['
+            '{"d":"2025-01-15","o":"73.00","h":"73.80","l":"72.50","c":"73.50","v":"1000"},'
+            '{"d":"2025-01-16","o":"73.50","h":"74.20","l":"73.00","c":"74.00","v":"1100"},'
+            '{"d":"2025-01-17","o":"74.00","h":"74.80","l":"73.50","c":"74.50","v":"1200"}'
+            ']);'
+        )
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.text = jsonp_data
+
+        result = fetch_reference_crude_prices(date(2025, 1, 17))
+
+        assert result is not None
+        # Should find prices for both varieties (same mock used for both API calls)
+        assert len(result) > 0
+        for name, price in result.items():
+            assert price == 74.50  # Close price on Jan 17
+
+    @patch("oilprice.prediction.requests.get")
+    def test_finds_nearest_trading_day(self, mock_get):
+        """参考日期非交易日时，使用最近交易日的收盘价"""
+        # Jan 18 is Saturday, should match Jan 17 (Friday)
+        jsonp_data = (
+            'var _result=(['
+            '{"d":"2025-01-16","o":"73.50","h":"74.20","l":"73.00","c":"73.80","v":"1100"},'
+            '{"d":"2025-01-17","o":"74.00","h":"74.80","l":"73.50","c":"74.50","v":"1200"}'
+            ']);'
+        )
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.text = jsonp_data
+
+        result = fetch_reference_crude_prices(date(2025, 1, 18))
+
+        assert result is not None
+        for name, price in result.items():
+            assert price == 74.50  # Jan 17 is closest to Jan 18
+
+    @patch("oilprice.prediction.requests.get")
+    def test_rejects_distant_dates(self, mock_get):
+        """距离参考日期超过5天时不使用"""
+        jsonp_data = (
+            'var _result=(['
+            '{"d":"2025-01-10","o":"73.00","h":"73.80","l":"72.50","c":"73.50","v":"1000"}'
+            ']);'
+        )
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.text = jsonp_data
+
+        # ref_date is Jan 20, but data only has Jan 10 (10 days away > 5 day threshold)
+        result = fetch_reference_crude_prices(date(2025, 1, 20))
+
+        assert result is None
+
+    @patch("oilprice.prediction.requests.get")
+    def test_network_error_returns_none(self, mock_get):
+        """网络错误返回 None"""
+        import requests
+
+        mock_get.side_effect = requests.ConnectionError("Connection refused")
+        result = fetch_reference_crude_prices(date(2025, 1, 17))
+        assert result is None
+
+    @patch("oilprice.prediction.requests.get")
+    def test_empty_response_returns_none(self, mock_get):
+        """空响应返回 None"""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.text = "var _result=([]);"
+        result = fetch_reference_crude_prices(date(2025, 1, 17))
+        assert result is None
+
+    @patch("oilprice.prediction.requests.get")
+    def test_malformed_jsonp_returns_none(self, mock_get):
+        """JSONP格式异常返回 None"""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.text = "invalid data without brackets"
+        result = fetch_reference_crude_prices(date(2025, 1, 17))
+        assert result is None
+
+
 class TestCalculateRetailPriceImpact:
     """测试零售价影响计算（定价链）"""
 
@@ -252,47 +384,86 @@ class TestCalculateRetailPriceImpact:
 class TestGeneratePrediction:
     """测试预测生成"""
 
+    @patch("oilprice.prediction.fetch_reference_crude_prices")
     @patch("oilprice.prediction.fetch_exchange_rate")
     @patch("oilprice.prediction.fetch_crude_oil_prices")
-    def test_prediction_with_rising_prices(self, mock_fetch, mock_fx):
-        """油价上涨时生成上调预测"""
+    def test_prediction_with_window_change_rising(self, mock_fetch, mock_fx, mock_ref):
+        """有上轮基准价时，使用窗口变动计算上涨预测"""
         mock_fx.return_value = 7.20
         mock_fetch.return_value = [
-            CrudeOilPrice(name="布伦特", price=78.50, change_pct=2.5, prev_close=76.58),
-            CrudeOilPrice(name="WTI", price=75.20, change_pct=2.0, prev_close=73.73),
+            CrudeOilPrice(name="布伦特", price=78.50, change_pct=0.5, prev_close=78.11),
+            CrudeOilPrice(name="WTI", price=75.20, change_pct=0.3, prev_close=74.97),
         ]
+        # 上轮调价基准价低于当前价 → 上涨
+        mock_ref.return_value = {"布伦特": 73.00, "WTI": 70.00}
 
         result = generate_prediction(date(2025, 3, 15))
 
         assert "调整" in result.summary
         assert "上涨趋势" in result.detail or "上调" in result.detail
-        assert "布伦特" in result.detail
-        assert "WTI" in result.detail
+        assert "较上轮调价" in result.detail
         assert "汇率" in result.detail
         assert "元/吨" in result.detail
         assert "元/升" in result.detail
 
+    @patch("oilprice.prediction.fetch_reference_crude_prices")
     @patch("oilprice.prediction.fetch_exchange_rate")
     @patch("oilprice.prediction.fetch_crude_oil_prices")
-    def test_prediction_with_falling_prices(self, mock_fetch, mock_fx):
-        """油价下跌时生成下调预测"""
+    def test_prediction_with_window_change_falling(self, mock_fetch, mock_fx, mock_ref):
+        """有上轮基准价时，使用窗口变动计算下跌预测"""
         mock_fx.return_value = 7.20
         mock_fetch.return_value = [
-            CrudeOilPrice(name="布伦特", price=68.00, change_pct=-3.0, prev_close=70.10),
+            CrudeOilPrice(name="布伦特", price=68.00, change_pct=0.5, prev_close=67.66),
         ]
+        # 上轮调价基准价高于当前价 → 下跌
+        mock_ref.return_value = {"布伦特": 73.00}
 
         result = generate_prediction(date(2025, 3, 15))
 
         assert "下跌趋势" in result.detail or "下调" in result.detail
-        assert "汇率" in result.detail
-        assert "元/吨" in result.detail
+        assert "较上轮调价" in result.detail
 
+    @patch("oilprice.prediction.fetch_reference_crude_prices")
     @patch("oilprice.prediction.fetch_exchange_rate")
     @patch("oilprice.prediction.fetch_crude_oil_prices")
-    def test_prediction_with_small_change(self, mock_fetch, mock_fx):
-        """波动较小时预测搁浅（使用50元/吨阈值）"""
+    def test_prediction_with_window_change_small(self, mock_fetch, mock_fx, mock_ref):
+        """窗口变动较小时预测搁浅"""
         mock_fx.return_value = 7.20
-        # 0.1%变化 ≈ 74.00×0.001=$0.074/桶 → 约8.6元/吨汽油 < 50元/吨阈值
+        mock_fetch.return_value = [
+            CrudeOilPrice(name="布伦特", price=74.20, change_pct=0.1, prev_close=74.13),
+        ]
+        # 上轮基准价与当前价接近 → 搁浅
+        mock_ref.return_value = {"布伦特": 74.00}
+
+        result = generate_prediction(date(2025, 3, 15))
+
+        assert "搁浅" in result.detail or "不调整" in result.detail
+        assert "较上轮调价" in result.detail
+        assert "不足" in result.detail or "50" in result.detail
+
+    @patch("oilprice.prediction.fetch_reference_crude_prices")
+    @patch("oilprice.prediction.fetch_exchange_rate")
+    @patch("oilprice.prediction.fetch_crude_oil_prices")
+    def test_fallback_to_daily_change(self, mock_fetch, mock_fx, mock_ref):
+        """无法获取历史数据时回退到当日变动"""
+        mock_fx.return_value = 7.20
+        mock_ref.return_value = None  # 历史数据不可用
+        mock_fetch.return_value = [
+            CrudeOilPrice(name="布伦特", price=78.50, change_pct=2.5, prev_close=76.58),
+        ]
+
+        result = generate_prediction(date(2025, 3, 15))
+
+        assert "当日" in result.detail
+        assert "上涨趋势" in result.detail or "上调" in result.detail
+
+    @patch("oilprice.prediction.fetch_reference_crude_prices")
+    @patch("oilprice.prediction.fetch_exchange_rate")
+    @patch("oilprice.prediction.fetch_crude_oil_prices")
+    def test_fallback_daily_small_change(self, mock_fetch, mock_fx, mock_ref):
+        """当日变动较小时（回退模式）也能预测搁浅"""
+        mock_fx.return_value = 7.20
+        mock_ref.return_value = None
         mock_fetch.return_value = [
             CrudeOilPrice(name="布伦特", price=74.00, change_pct=0.1, prev_close=73.93),
         ]
@@ -300,7 +471,7 @@ class TestGeneratePrediction:
         result = generate_prediction(date(2025, 3, 15))
 
         assert "搁浅" in result.detail or "不调整" in result.detail
-        assert "不足" in result.detail or "50" in result.detail
+        assert "当日" in result.detail
 
     @patch("oilprice.prediction.fetch_crude_oil_prices")
     def test_prediction_without_crude_prices(self, mock_fetch):
@@ -312,11 +483,13 @@ class TestGeneratePrediction:
         assert "调整" in result.summary
         assert "暂无" in result.detail
 
+    @patch("oilprice.prediction.fetch_reference_crude_prices")
     @patch("oilprice.prediction.fetch_exchange_rate")
     @patch("oilprice.prediction.fetch_crude_oil_prices")
-    def test_prediction_summary_contains_date(self, mock_fetch, mock_fx):
+    def test_prediction_summary_contains_date(self, mock_fetch, mock_fx, mock_ref):
         """预测摘要包含调价日期"""
         mock_fx.return_value = 7.20
+        mock_ref.return_value = None
         mock_fetch.return_value = []
 
         result = generate_prediction(date(2025, 1, 20))
@@ -325,11 +498,13 @@ class TestGeneratePrediction:
         assert "1月31日" in result.summary
         assert "24时调整" in result.summary
 
+    @patch("oilprice.prediction.fetch_reference_crude_prices")
     @patch("oilprice.prediction.fetch_exchange_rate")
     @patch("oilprice.prediction.fetch_crude_oil_prices")
-    def test_prediction_with_no_change_pct(self, mock_fetch, mock_fx):
-        """有价格但无涨跌幅时显示价格和汇率"""
+    def test_prediction_with_no_change_pct(self, mock_fetch, mock_fx, mock_ref):
+        """有价格但无涨跌幅且无基准价时显示价格和汇率"""
         mock_fx.return_value = 7.20
+        mock_ref.return_value = None
         mock_fetch.return_value = [
             CrudeOilPrice(name="布伦特", price=74.50, change_pct=None),
         ]
@@ -340,33 +515,42 @@ class TestGeneratePrediction:
         assert "74.50" in result.detail
         assert "汇率" in result.detail
 
+    @patch("oilprice.prediction.fetch_reference_crude_prices")
     @patch("oilprice.prediction.fetch_exchange_rate")
     @patch("oilprice.prediction.fetch_crude_oil_prices")
-    def test_prediction_uses_prev_close_for_change(self, mock_fetch, mock_fx):
-        """优先使用前收盘价计算绝对变动"""
+    def test_window_change_overrides_daily_change(self, mock_fetch, mock_fx, mock_ref):
+        """窗口变动优先于当日变动:
+        当日微涨0.5%但相对上轮调价实际上涨5美元"""
         mock_fx.return_value = 7.20
-        # prev_close=75.00, price=76.00 → change = +$1.00/barrel
         mock_fetch.return_value = [
             CrudeOilPrice(
-                name="布伦特", price=76.00, change_pct=1.33, prev_close=75.00
+                name="布伦特", price=78.00, change_pct=0.5, prev_close=77.61
             ),
         ]
+        # 上轮调价时仅73美元 → 实际窗口涨了5美元
+        mock_ref.return_value = {"布伦特": 73.00}
 
         result = generate_prediction(date(2025, 3, 15))
 
+        # 虽然当日仅涨0.5%，但相对上轮调价涨了约6.85% → 应是上涨趋势
         assert "上涨趋势" in result.detail or "上调" in result.detail
-        assert "元/升" in result.detail
+        assert "较上轮调价" in result.detail
 
+    @patch("oilprice.prediction.fetch_reference_crude_prices")
     @patch("oilprice.prediction.fetch_exchange_rate")
     @patch("oilprice.prediction.fetch_crude_oil_prices")
-    def test_prediction_falls_back_to_pct_without_prev_close(self, mock_fetch, mock_fx):
-        """无前收盘价时回退到百分比计算"""
+    def test_partial_ref_prices_uses_available(self, mock_fetch, mock_fx, mock_ref):
+        """仅部分品种有基准价时，使用有基准价的品种计算窗口变动"""
         mock_fx.return_value = 7.20
         mock_fetch.return_value = [
-            CrudeOilPrice(name="布伦特", price=75.00, change_pct=2.0),
+            CrudeOilPrice(name="布伦特", price=78.00, change_pct=0.5, prev_close=77.61),
+            CrudeOilPrice(name="WTI", price=75.00, change_pct=0.3, prev_close=74.78),
         ]
+        # 仅布伦特有基准价
+        mock_ref.return_value = {"布伦特": 73.00}
 
         result = generate_prediction(date(2025, 3, 15))
 
-        assert "上涨趋势" in result.detail or "上调" in result.detail
-        assert "元/吨" in result.detail
+        # 使用布伦特的窗口变动
+        assert "较上轮调价" in result.detail
+        assert "布伦特" in result.detail

@@ -10,6 +10,7 @@
 定价链: 国际原油价格(美元/桶) → 汇率转换 → 原油成本(元/吨) → 炼油加工 → 税费 → 零售价(元/升)
 """
 
+import json
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -34,6 +35,12 @@ _SINA_HQ_URL = "https://hq.sinajs.cn/list=hf_OIL,hf_CL"
 
 # 新浪财经汇率 API（美元兑人民币）
 _SINA_FX_URL = "https://hq.sinajs.cn/list=fx_susdcny"
+
+# 新浪财经国际期货日K线数据 API（获取历史收盘价）
+_SINA_KLINE_URL_TPL = (
+    "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/"
+    "var%20_result=/InnerFuturesNewService.getDailyKLine?symbol={symbol}"
+)
 
 # 已知调价参考日期（计算起点）
 _REFERENCE_DATE = date(2025, 1, 17)
@@ -120,6 +127,29 @@ def get_next_adjustment_date(today: date | None = None) -> date:
         current = _add_working_days(current, 10)
 
     return current
+
+
+def get_previous_adjustment_date(today: date | None = None) -> date | None:
+    """计算上一次油价调整日期
+
+    基于已知基准日（2025-01-17）和10个工作日周期推算。
+
+    Args:
+        today: 当前日期，默认使用系统日期
+
+    Returns:
+        上一次调价日期，如果在基准日当天或之前返回 None
+    """
+    if today is None:
+        today = date.today()
+
+    current = _REFERENCE_DATE
+    prev = None
+    while current < today:
+        prev = current
+        current = _add_working_days(current, 10)
+
+    return prev
 
 
 def fetch_crude_oil_prices() -> list[CrudeOilPrice]:
@@ -231,6 +261,85 @@ def fetch_exchange_rate() -> float:
         return _DEFAULT_EXCHANGE_RATE
 
 
+def fetch_reference_crude_prices(ref_date: date) -> dict[str, float] | None:
+    """获取上次调价日期附近的原油收盘价作为基准价
+
+    从新浪财经日K线数据中查找距离参考日期最近交易日的收盘价。
+
+    Args:
+        ref_date: 参考日期（上次调价日）
+
+    Returns:
+        {"布伦特": price, "WTI": price} 字典，获取失败返回 None
+    """
+    symbols = [("hf_OIL", "布伦特"), ("hf_CL", "WTI")]
+    ref_prices: dict[str, float] = {}
+
+    for symbol, name in symbols:
+        try:
+            url = _SINA_KLINE_URL_TPL.format(symbol=symbol)
+            response = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+            response.raise_for_status()
+            response.encoding = "utf-8"
+            text = response.text.strip()
+
+            # 从 JSONP 响应中提取 JSON 数组
+            start_idx = text.find("[")
+            end_idx = text.rfind("]")
+            if start_idx < 0 or end_idx < 0:
+                logger.debug(f"{name}K线数据响应格式异常")
+                continue
+
+            json_str = text[start_idx : end_idx + 1]
+            data = json.loads(json_str)
+
+            if not data:
+                continue
+
+            # 查找距离参考日期最近交易日的收盘价（容差5个日历日）
+            best_price = None
+            best_diff = None
+
+            for entry in data:
+                try:
+                    if isinstance(entry, dict):
+                        entry_date_str = entry.get("d", "")
+                        close_str = entry.get("c", "")
+                    elif isinstance(entry, list) and len(entry) >= 5:
+                        entry_date_str = str(entry[0])
+                        close_str = str(entry[4])
+                    else:
+                        continue
+
+                    entry_date = date.fromisoformat(entry_date_str)
+                    close_price = float(close_str)
+                    diff = abs((entry_date - ref_date).days)
+
+                    if best_diff is None or diff < best_diff:
+                        best_diff = diff
+                        best_price = close_price
+                except (ValueError, TypeError):
+                    continue
+
+            if best_price is not None and best_diff is not None and best_diff <= 5:
+                ref_prices[name] = best_price
+                logger.info(
+                    f"{name}上轮调价参考价: {best_price:.2f}美元/桶"
+                    f"（距参考日{best_diff}天）"
+                )
+
+        except (requests.RequestException, json.JSONDecodeError) as e:
+            logger.warning(f"获取{name}历史K线数据失败: {e}")
+            continue
+
+    if ref_prices:
+        logger.info(f"获取到 {len(ref_prices)} 个品种的调价基准价")
+    else:
+        logger.warning("未能获取调价基准价，将使用当日变动数据")
+
+    return ref_prices if ref_prices else None
+
+
 def _calculate_retail_price_impact(
     crude_change_usd: float,
     exchange_rate: float,
@@ -270,8 +379,12 @@ def _calculate_retail_price_impact(
 def generate_prediction(today: date | None = None) -> AdjustmentInfo:
     """生成油价调整预测信息
 
-    使用完整定价链计算:
+    使用完整定价链计算当前油价相对于上次调价时的变动:
     国际原油价格(美元/桶) → 汇率转换 → 加工成本 → 税费 → 零售价(元/升)
+
+    价格变动计算优先级:
+    1. 优先使用上轮调价基准价（窗口变动，更准确）
+    2. 无法获取历史数据时，使用当日涨跌幅（回退方案）
 
     考虑因素:
     - 国际原油价格（布伦特、WTI）
@@ -289,8 +402,9 @@ def generate_prediction(today: date | None = None) -> AdjustmentInfo:
     if today is None:
         today = date.today()
 
-    # 1. 计算下次调价日期
+    # 1. 计算调价日期
     next_date = get_next_adjustment_date(today)
+    prev_date = get_previous_adjustment_date(today)
     summary = f"下次油价{next_date.month}月{next_date.day}日24时调整"
 
     # 2. 获取国际油价
@@ -303,43 +417,57 @@ def generate_prediction(today: date | None = None) -> AdjustmentInfo:
     # 3. 获取实时汇率
     exchange_rate = fetch_exchange_rate()
 
-    # 4. 计算原油价格变动（美元/桶）
+    # 4. 尝试获取上轮调价基准价（用于计算窗口变动）
+    ref_prices = fetch_reference_crude_prices(prev_date) if prev_date else None
+
+    # 5. 计算原油价格变动（美元/桶）
     price_parts = []
     total_change_usd = 0.0
     change_count = 0
+    using_window_change = False
 
     for cp in crude_prices:
-        desc = f"{cp.name}{cp.price:.2f}美元/桶"
-        if cp.change_pct is not None:
+        if ref_prices and cp.name in ref_prices:
+            # 使用窗口变动: 当前价格 vs 上轮调价基准价
+            ref_price = ref_prices[cp.name]
+            change_usd = cp.price - ref_price
+            change_pct = (change_usd / ref_price) * 100
+            arrow = "↑" if change_usd > 0 else "↓" if change_usd < 0 else "→"
+            desc = f"{cp.name}{cp.price:.2f}美元/桶({arrow}{abs(change_pct):.2f}%)"
+            total_change_usd += change_usd
+            change_count += 1
+            using_window_change = True
+        elif cp.change_pct is not None:
+            # 回退: 使用当日涨跌幅
             arrow = "↑" if cp.change_pct > 0 else "↓" if cp.change_pct < 0 else "→"
-            desc += f"({arrow}{abs(cp.change_pct):.2f}%)"
-
-            # 计算绝对变动（美元/桶）
+            desc = f"{cp.name}{cp.price:.2f}美元/桶({arrow}{abs(cp.change_pct):.2f}%)"
             if cp.prev_close is not None and cp.prev_close > 0:
                 change_usd = cp.price - cp.prev_close
             else:
                 change_usd = cp.price * (cp.change_pct / 100)
-
             total_change_usd += change_usd
             change_count += 1
+        else:
+            desc = f"{cp.name}{cp.price:.2f}美元/桶"
         price_parts.append(desc)
 
     price_str = "，".join(price_parts)
+    change_label = "较上轮调价" if using_window_change else "当日"
 
     if change_count > 0:
         avg_change_usd = total_change_usd / change_count
 
-        # 5. 通过完整定价链计算零售价影响
+        # 6. 通过完整定价链计算零售价影响
         gasoline_change_per_ton, retail_change_per_liter = (
             _calculate_retail_price_impact(avg_change_usd, exchange_rate)
         )
 
-        # 6. 根据阈值判断调价方向
+        # 7. 根据阈值判断调价方向
         if abs(gasoline_change_per_ton) < ADJUSTMENT_THRESHOLD_PER_TON:
             detail = (
                 f"国际油价({price_str})，"
                 f"汇率{exchange_rate:.2f}，"
-                f"折合变动约{gasoline_change_per_ton:+.0f}元/吨"
+                f"{change_label}变动约{gasoline_change_per_ton:+.0f}元/吨"
                 f"(不足{ADJUSTMENT_THRESHOLD_PER_TON}元/吨)，"
                 f"预计本轮油价搁浅不调整"
             )
@@ -347,14 +475,14 @@ def generate_prediction(today: date | None = None) -> AdjustmentInfo:
             detail = (
                 f"国际油价({price_str})呈上涨趋势，"
                 f"汇率{exchange_rate:.2f}，"
-                f"折合变动约{gasoline_change_per_ton:+.0f}元/吨，"
+                f"{change_label}变动约{gasoline_change_per_ton:+.0f}元/吨，"
                 f"预计油价上调约{abs(retail_change_per_liter):.2f}元/升"
             )
         else:
             detail = (
                 f"国际油价({price_str})呈下跌趋势，"
                 f"汇率{exchange_rate:.2f}，"
-                f"折合变动约{gasoline_change_per_ton:+.0f}元/吨，"
+                f"{change_label}变动约{gasoline_change_per_ton:+.0f}元/吨，"
                 f"预计油价下调约{abs(retail_change_per_liter):.2f}元/升"
             )
     else:
