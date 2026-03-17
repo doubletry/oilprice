@@ -3,6 +3,7 @@
 数据源:
 - 主数据源: 汽车之家 (autohome.com.cn/oil/) — 获取全国各省实时油价
 - 补充数据源: 汽油价格网 (qiyoujiage.com) — 获取油价调整预测信息
+- 备选方案: 自动生成预测 — 基于国际油价和调价周期生成调价预测
 """
 
 import re
@@ -193,5 +194,19 @@ def scrape_oil_prices() -> OilPriceData:
             logger.warning("未能获取调价预测信息，将仅推送实时油价")
     else:
         logger.warning("无法访问汽油价格网，将仅推送实时油价")
+
+    # 3. 若未获取到调价信息，使用自动生成的预测作为备选
+    if adjustment is None:
+        logger.info("尝试自动生成调价预测信息...")
+        try:
+            from .prediction import generate_prediction
+
+            adjustment = generate_prediction()
+            if adjustment:
+                logger.info(
+                    f"自动生成调价预测: {adjustment.summary} {adjustment.detail}"
+                )
+        except Exception as e:
+            logger.warning(f"自动生成调价预测失败: {e}")
 
     return OilPriceData(prices=prices, adjustment=adjustment)
