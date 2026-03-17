@@ -36,11 +36,20 @@ _SINA_HQ_URL = "https://hq.sinajs.cn/list=hf_OIL,hf_CL"
 # 新浪财经汇率 API（美元兑人民币）
 _SINA_FX_URL = "https://hq.sinajs.cn/list=fx_susdcny"
 
-# 新浪财经国际期货日K线数据 API（获取历史收盘价，使用 json.php 返回纯 JSON）
-_SINA_KLINE_URL_TPL = (
-    "https://stock2.finance.sina.com.cn/futures/api/json.php/"
-    "InnerFuturesNewService.getDailyKLine?symbol={symbol}"
-)
+# 新浪财经期货日K线数据 API（获取历史收盘价）
+# 按优先级尝试多个接口地址，兼容不同环境
+_SINA_KLINE_URL_PATTERNS = [
+    # 优先: IndexService 接口（广泛验证可用于国际期货 hf_OIL/hf_CL）
+    (
+        "https://stock2.finance.sina.com.cn/futures/api/json.php/"
+        "IndexService.getInnerFuturesDailyKLine?symbol={symbol}"
+    ),
+    # 备用: InnerFuturesNewService jsonp 格式
+    (
+        "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/"
+        "var%20_result=/InnerFuturesNewService.getDailyKLine?symbol={symbol}"
+    ),
+]
 
 # 已知调价参考日期（计算起点）
 _REFERENCE_DATE = date(2025, 1, 17)
@@ -201,7 +210,7 @@ def fetch_crude_oil_prices() -> list[CrudeOilPrice]:
                                 2,
                             )
                     except ValueError:
-                        pass
+                        logger.exception("解析前收盘价失败")
 
                 prices.append(
                     CrudeOilPrice(
@@ -211,8 +220,8 @@ def fetch_crude_oil_prices() -> list[CrudeOilPrice]:
                         prev_close=prev_close_price,
                     )
                 )
-            except (IndexError, ValueError) as e:
-                logger.debug(f"解析原油价格行失败: {e}")
+            except (IndexError, ValueError):
+                logger.exception("解析原油价格行失败")
                 continue
 
         if prices:
@@ -222,8 +231,8 @@ def fetch_crude_oil_prices() -> list[CrudeOilPrice]:
 
         return prices
 
-    except requests.RequestException as e:
-        logger.warning(f"获取国际原油价格失败: {e}")
+    except requests.RequestException:
+        logger.exception("获取国际原油价格失败")
         return []
 
 
@@ -279,18 +288,99 @@ def fetch_exchange_rate() -> float:
         logger.info(f"当前美元兑人民币汇率: {rate:.4f}")
         return rate
 
-    except (requests.RequestException, ValueError, IndexError) as e:
+    except (requests.RequestException, ValueError, IndexError):
         logger.exception(f"获取汇率失败，使用默认值 {_DEFAULT_EXCHANGE_RATE}")
         return _DEFAULT_EXCHANGE_RATE
+
+
+def _parse_kline_json(text: str) -> list | None:
+    """从K线API响应文本中解析JSON数组
+
+    支持纯JSON和JSONP包装两种响应格式。
+    API可能返回 null、空字符串或格式异常的数据。
+
+    Args:
+        text: API响应文本
+
+    Returns:
+        解析后的K线数据列表，解析失败返回 None
+    """
+    text = text.strip()
+
+    # 空响应或 null
+    if not text or text == "null":
+        return None
+
+    # 纯JSON数组: [...]
+    if text.startswith("["):
+        data = json.loads(text)
+        return data if data else None
+
+    # JSONP包装: var _result=([...]); 或类似格式
+    start_idx = text.find("[")
+    end_idx = text.rfind("]")
+    if start_idx < 0 or end_idx < 0:
+        return None
+
+    json_str = text[start_idx : end_idx + 1]
+    data = json.loads(json_str)
+    return data if data else None
+
+
+def _fetch_kline_data(symbol: str, name: str) -> list | None:
+    """从新浪财经获取期货K线数据，尝试多个API接口
+
+    按优先级尝试 _SINA_KLINE_URL_PATTERNS 中的接口地址，
+    返回第一个成功解析的K线数据。
+
+    Args:
+        symbol: 期货品种代码（如 "hf_OIL"）
+        name: 品种中文名称（用于日志）
+
+    Returns:
+        K线数据列表，所有接口都失败时返回 None
+    """
+    last_had_exception = False
+
+    for url_tpl in _SINA_KLINE_URL_PATTERNS:
+        url = url_tpl.format(symbol=symbol)
+        try:
+            response = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+            response.raise_for_status()
+            response.encoding = "utf-8"
+            text = response.text.strip()
+
+            data = _parse_kline_json(text)
+            if data:
+                logger.info(f"{name}K线数据获取成功，共{len(data)}条记录")
+                return data
+            else:
+                logger.debug(
+                    f"{name}K线接口返回空数据，尝试下一个接口。"
+                    f"URL: {url}，响应前100字符: {text[:100]}"
+                )
+        except (requests.RequestException, json.JSONDecodeError):
+            last_had_exception = True
+            logger.exception(f"{name}K线接口请求失败: {url}")
+            continue
+
+    # 所有接口都失败
+    if last_had_exception:
+        logger.warning(f"获取{name}历史K线数据失败，所有接口均不可用")
+    else:
+        logger.warning(f"获取{name}历史K线数据失败，所有接口返回空数据")
+    return None
 
 
 def fetch_reference_crude_prices(ref_date: date) -> dict[str, float] | None:
     """获取上次调价日期附近的原油收盘价作为基准价
 
     从新浪财经日K线数据中查找距离参考日期最近交易日的收盘价。
+    自动尝试多个API接口（IndexService / InnerFuturesNewService）确保数据获取可靠。
 
-    新浪K线API返回JSON数组，每个元素格式:
+    K线数据格式（支持多种key名称）:
     {"day":"2025-01-17","open":"74.00","high":"74.80","low":"73.50","close":"74.50","volume":"1200"}
+    或: {"date":"2025-01-17","open":"74.00",...,"close":"74.50",...}
 
     Args:
         ref_date: 参考日期（上次调价日）
@@ -302,69 +392,47 @@ def fetch_reference_crude_prices(ref_date: date) -> dict[str, float] | None:
     ref_prices: dict[str, float] = {}
 
     for symbol, name in symbols:
-        try:
-            url = _SINA_KLINE_URL_TPL.format(symbol=symbol)
-            response = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
-            response.raise_for_status()
-            response.encoding = "utf-8"
-            text = response.text.strip()
+        data = _fetch_kline_data(symbol, name)
+        if not data:
+            continue
 
-            # 解析JSON响应（json.php返回纯JSON数组）
-            # 兼容处理: 若响应包含JSONP包装则提取JSON部分
-            if text.startswith("["):
-                json_str = text
-            else:
-                start_idx = text.find("[")
-                end_idx = text.rfind("]")
-                if start_idx < 0 or end_idx < 0:
-                    logger.warning(
-                        f"{name}K线数据响应格式异常，无法找到JSON数组。"
-                        f"响应内容前100字符: {text[:100]}"
+        # 查找距离参考日期最近交易日的收盘价（容差5个日历日）
+        best_price = None
+        best_diff = None
+
+        for entry in data:
+            try:
+                if isinstance(entry, dict):
+                    # 支持多种key格式: "day"/"date"/"d" 和 "close"/"c"
+                    entry_date_str = (
+                        entry.get("day")
+                        or entry.get("date")
+                        or entry.get("d", "")
                     )
+                    close_str = entry.get("close") or entry.get("c", "")
+                elif isinstance(entry, list) and len(entry) >= 5:
+                    entry_date_str = str(entry[0])
+                    close_str = str(entry[4])
+                else:
                     continue
-                json_str = text[start_idx : end_idx + 1]
 
-            data = json.loads(json_str)
+                entry_date = date.fromisoformat(entry_date_str)
+                close_price = float(close_str)
+                diff = abs((entry_date - ref_date).days)
 
-            if not data:
+                if best_diff is None or diff < best_diff:
+                    best_diff = diff
+                    best_price = close_price
+            except (ValueError, TypeError):
+                logger.exception(f"解析{name}K线数据条目失败")
                 continue
 
-            # 查找距离参考日期最近交易日的收盘价（容差5个日历日）
-            best_price = None
-            best_diff = None
-
-            for entry in data:
-                try:
-                    if isinstance(entry, dict):
-                        # 支持两种key格式: "day"/"close" 或 "d"/"c"
-                        entry_date_str = entry.get("day") or entry.get("d", "")
-                        close_str = entry.get("close") or entry.get("c", "")
-                    elif isinstance(entry, list) and len(entry) >= 5:
-                        entry_date_str = str(entry[0])
-                        close_str = str(entry[4])
-                    else:
-                        continue
-
-                    entry_date = date.fromisoformat(entry_date_str)
-                    close_price = float(close_str)
-                    diff = abs((entry_date - ref_date).days)
-
-                    if best_diff is None or diff < best_diff:
-                        best_diff = diff
-                        best_price = close_price
-                except (ValueError, TypeError):
-                    continue
-
-            if best_price is not None and best_diff is not None and best_diff <= 5:
-                ref_prices[name] = best_price
-                logger.info(
-                    f"{name}上轮调价参考价: {best_price:.2f}美元/桶"
-                    f"（距参考日{best_diff}天）"
-                )
-
-        except (requests.RequestException, json.JSONDecodeError) as e:
-            logger.exception(f"获取{name}历史K线数据失败")
-            continue
+        if best_price is not None and best_diff is not None and best_diff <= 5:
+            ref_prices[name] = best_price
+            logger.info(
+                f"{name}上轮调价参考价: {best_price:.2f}美元/桶"
+                f"（距参考日{best_diff}天）"
+            )
 
     if ref_prices:
         logger.info(f"获取到 {len(ref_prices)} 个品种的调价基准价")
@@ -464,13 +532,16 @@ def generate_prediction(today: date | None = None) -> AdjustmentInfo:
         if ref_prices and cp.name in ref_prices:
             # 使用窗口变动: 当前价格 vs 上轮调价基准价
             ref_price = ref_prices[cp.name]
-            change_usd = cp.price - ref_price
-            change_pct = (change_usd / ref_price) * 100
-            arrow = "↑" if change_usd > 0 else "↓" if change_usd < 0 else "→"
-            desc = f"{cp.name}{cp.price:.2f}美元/桶({arrow}{abs(change_pct):.2f}%)"
-            total_change_usd += change_usd
-            change_count += 1
-            using_window_change = True
+            if ref_price > 0:
+                change_usd = cp.price - ref_price
+                change_pct = (change_usd / ref_price) * 100
+                arrow = "↑" if change_usd > 0 else "↓" if change_usd < 0 else "→"
+                desc = f"{cp.name}{cp.price:.2f}美元/桶({arrow}{abs(change_pct):.2f}%)"
+                total_change_usd += change_usd
+                change_count += 1
+                using_window_change = True
+            else:
+                desc = f"{cp.name}{cp.price:.2f}美元/桶"
         elif cp.change_pct is not None:
             # 回退: 使用当日涨跌幅
             arrow = "↑" if cp.change_pct > 0 else "↓" if cp.change_pct < 0 else "→"

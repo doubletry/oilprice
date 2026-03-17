@@ -1,7 +1,7 @@
 """油价调整预测模块测试"""
 
 from datetime import date
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -14,6 +14,8 @@ from oilprice.prediction import (
     CrudeOilPrice,
     _add_working_days,
     _calculate_retail_price_impact,
+    _fetch_kline_data,
+    _parse_kline_json,
     fetch_crude_oil_prices,
     fetch_exchange_rate,
     fetch_reference_crude_prices,
@@ -260,42 +262,151 @@ class TestFetchExchangeRate:
         assert rate == 7.20
 
 
+class TestParseKlineJson:
+    """测试K线JSON解析"""
+
+    def test_pure_json_array(self):
+        """纯JSON数组格式"""
+        text = '[{"day":"2025-01-17","close":"74.50"}]'
+        result = _parse_kline_json(text)
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["close"] == "74.50"
+
+    def test_jsonp_wrapped(self):
+        """JSONP包装格式"""
+        text = 'var _result=([{"d":"2025-01-17","c":"74.50"}]);'
+        result = _parse_kline_json(text)
+        assert result is not None
+        assert len(result) == 1
+
+    def test_null_response(self):
+        """null响应返回None"""
+        assert _parse_kline_json("null") is None
+
+    def test_empty_string(self):
+        """空字符串返回None"""
+        assert _parse_kline_json("") is None
+
+    def test_empty_array(self):
+        """空数组返回None"""
+        assert _parse_kline_json("[]") is None
+
+    def test_no_brackets(self):
+        """无方括号返回None"""
+        assert _parse_kline_json("invalid data") is None
+
+    def test_whitespace_handling(self):
+        """前后空白字符处理"""
+        text = '  [{"day":"2025-01-17","close":"74.50"}]  \n'
+        result = _parse_kline_json(text)
+        assert result is not None
+
+
+class TestFetchKlineData:
+    """测试K线数据获取（多接口回退）"""
+
+    @patch("oilprice.prediction.requests.get")
+    def test_first_url_succeeds(self, mock_get):
+        """第一个接口成功时直接返回"""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.text = '[{"day":"2025-01-17","close":"74.50"}]'
+
+        result = _fetch_kline_data("hf_OIL", "布伦特")
+
+        assert result is not None
+        assert len(result) == 1
+        # 应该只调用了一次（第一个URL成功，不尝试第二个）
+        assert mock_get.call_count == 1
+
+    @patch("oilprice.prediction.requests.get")
+    def test_fallback_to_second_url(self, mock_get):
+        """第一个接口返回null时，回退到第二个接口"""
+        # 第一次调用返回null，第二次返回有效数据
+        response_null = MagicMock()
+        response_null.status_code = 200
+        response_null.text = "null"
+
+        response_ok = MagicMock()
+        response_ok.status_code = 200
+        response_ok.text = (
+            'var _result=([{"d":"2025-01-17","c":"74.50"}]);'
+        )
+
+        mock_get.side_effect = [response_null, response_ok]
+
+        result = _fetch_kline_data("hf_OIL", "布伦特")
+
+        assert result is not None
+        assert len(result) == 1
+        assert mock_get.call_count == 2
+
+    @patch("oilprice.prediction.requests.get")
+    def test_all_urls_fail_network(self, mock_get):
+        """所有接口都网络错误返回None"""
+        import requests
+        mock_get.side_effect = requests.ConnectionError("Connection refused")
+
+        result = _fetch_kline_data("hf_OIL", "布伦特")
+
+        assert result is None
+
+    @patch("oilprice.prediction.requests.get")
+    def test_all_urls_return_null(self, mock_get):
+        """所有接口都返回null"""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.text = "null"
+
+        result = _fetch_kline_data("hf_OIL", "布伦特")
+
+        assert result is None
+
+    @patch("oilprice.prediction.requests.get")
+    def test_first_url_error_second_succeeds(self, mock_get):
+        """第一个接口网络错误，第二个接口成功"""
+        import requests
+
+        response_ok = MagicMock()
+        response_ok.status_code = 200
+        response_ok.text = '[{"day":"2025-01-17","close":"74.50"}]'
+
+        mock_get.side_effect = [
+            requests.ConnectionError("Connection refused"),
+            response_ok,
+        ]
+
+        result = _fetch_kline_data("hf_OIL", "布伦特")
+
+        assert result is not None
+        assert len(result) == 1
+
+
 class TestFetchReferenceCrudePrices:
     """测试历史基准价获取"""
 
-    @patch("oilprice.prediction.requests.get")
-    def test_parse_kline_dict_format(self, mock_get):
+    @patch("oilprice.prediction._fetch_kline_data")
+    def test_parse_kline_dict_format(self, mock_kline):
         """正常解析JSON字典格式的K线数据（day/close 键名）"""
-        # 模拟纯 JSON 响应（json.php 格式）
-        json_data = (
-            '['
-            '{"day":"2025-01-15","open":"73.00","high":"73.80","low":"72.50","close":"73.50","volume":"1000"},'
-            '{"day":"2025-01-16","open":"73.50","high":"74.20","low":"73.00","close":"74.00","volume":"1100"},'
-            '{"day":"2025-01-17","open":"74.00","high":"74.80","low":"73.50","close":"74.50","volume":"1200"}'
-            ']'
-        )
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.text = json_data
+        mock_kline.return_value = [
+            {"day": "2025-01-15", "open": "73.00", "high": "73.80", "low": "72.50", "close": "73.50", "volume": "1000"},
+            {"day": "2025-01-16", "open": "73.50", "high": "74.20", "low": "73.00", "close": "74.00", "volume": "1100"},
+            {"day": "2025-01-17", "open": "74.00", "high": "74.80", "low": "73.50", "close": "74.50", "volume": "1200"},
+        ]
 
         result = fetch_reference_crude_prices(date(2025, 1, 17))
 
         assert result is not None
-        # Should find prices for both varieties (same mock used for both API calls)
         assert len(result) > 0
         for name, price in result.items():
             assert price == 74.50  # Close price on Jan 17
 
-    @patch("oilprice.prediction.requests.get")
-    def test_parse_kline_short_key_format(self, mock_get):
-        """兼容解析短键名格式（d/c 键名，老版本JSONP格式）"""
-        jsonp_data = (
-            'var _result=(['
-            '{"d":"2025-01-16","o":"73.50","h":"74.20","l":"73.00","c":"74.00","v":"1100"},'
-            '{"d":"2025-01-17","o":"74.00","h":"74.80","l":"73.50","c":"74.50","v":"1200"}'
-            ']);'
-        )
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.text = jsonp_data
+    @patch("oilprice.prediction._fetch_kline_data")
+    def test_parse_kline_short_key_format(self, mock_kline):
+        """兼容解析短键名格式（d/c 键名，老版本格式）"""
+        mock_kline.return_value = [
+            {"d": "2025-01-16", "o": "73.50", "h": "74.20", "l": "73.00", "c": "74.00", "v": "1100"},
+            {"d": "2025-01-17", "o": "74.00", "h": "74.80", "l": "73.50", "c": "74.50", "v": "1200"},
+        ]
 
         result = fetch_reference_crude_prices(date(2025, 1, 17))
 
@@ -304,44 +415,57 @@ class TestFetchReferenceCrudePrices:
         for name, price in result.items():
             assert price == 74.50
 
-    @patch("oilprice.prediction.requests.get")
-    def test_finds_nearest_trading_day(self, mock_get):
-        """参考日期非交易日时，使用最近交易日的收盘价"""
-        # Jan 18 is Saturday, should match Jan 17 (Friday)
-        json_data = (
-            '['
-            '{"day":"2025-01-16","open":"73.50","high":"74.20","low":"73.00","close":"73.80","volume":"1100"},'
-            '{"day":"2025-01-17","open":"74.00","high":"74.80","low":"73.50","close":"74.50","volume":"1200"}'
-            ']'
-        )
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.text = json_data
+    @patch("oilprice.prediction._fetch_kline_data")
+    def test_parse_kline_date_key_format(self, mock_kline):
+        """兼容解析 date 键名格式"""
+        mock_kline.return_value = [
+            {"date": "2025-01-17", "open": "74.00", "high": "74.80", "low": "73.50", "close": "74.50", "volume": "1200"},
+        ]
 
+        result = fetch_reference_crude_prices(date(2025, 1, 17))
+
+        assert result is not None
+        assert len(result) > 0
+        for name, price in result.items():
+            assert price == 74.50
+
+    @patch("oilprice.prediction._fetch_kline_data")
+    def test_finds_nearest_trading_day(self, mock_kline):
+        """参考日期非交易日时，使用最近交易日的收盘价"""
+        mock_kline.return_value = [
+            {"day": "2025-01-16", "open": "73.50", "high": "74.20", "low": "73.00", "close": "73.80", "volume": "1100"},
+            {"day": "2025-01-17", "open": "74.00", "high": "74.80", "low": "73.50", "close": "74.50", "volume": "1200"},
+        ]
+
+        # Jan 18 is Saturday, should match Jan 17 (Friday)
         result = fetch_reference_crude_prices(date(2025, 1, 18))
 
         assert result is not None
         for name, price in result.items():
             assert price == 74.50  # Jan 17 is closest to Jan 18
 
-    @patch("oilprice.prediction.requests.get")
-    def test_rejects_distant_dates(self, mock_get):
+    @patch("oilprice.prediction._fetch_kline_data")
+    def test_rejects_distant_dates(self, mock_kline):
         """距离参考日期超过5天时不使用"""
-        json_data = (
-            '['
-            '{"day":"2025-01-10","open":"73.00","high":"73.80","low":"72.50","close":"73.50","volume":"1000"}'
-            ']'
-        )
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.text = json_data
+        mock_kline.return_value = [
+            {"day": "2025-01-10", "open": "73.00", "high": "73.80", "low": "72.50", "close": "73.50", "volume": "1000"},
+        ]
 
         # ref_date is Jan 20, but data only has Jan 10 (10 days away > 5 day threshold)
         result = fetch_reference_crude_prices(date(2025, 1, 20))
 
         assert result is None
 
+    @patch("oilprice.prediction._fetch_kline_data")
+    def test_kline_data_unavailable_returns_none(self, mock_kline):
+        """K线数据不可用时返回 None"""
+        mock_kline.return_value = None
+        result = fetch_reference_crude_prices(date(2025, 1, 17))
+        assert result is None
+
     @patch("oilprice.prediction.requests.get")
     def test_network_error_returns_none(self, mock_get):
-        """网络错误返回 None"""
+        """网络错误返回 None（集成测试，经过完整K线获取流程）"""
         import requests
 
         mock_get.side_effect = requests.ConnectionError("Connection refused")
@@ -349,16 +473,16 @@ class TestFetchReferenceCrudePrices:
         assert result is None
 
     @patch("oilprice.prediction.requests.get")
-    def test_empty_response_returns_none(self, mock_get):
-        """空响应返回 None"""
+    def test_null_response_returns_none(self, mock_get):
+        """所有K线接口返回null时返回 None"""
         mock_get.return_value.status_code = 200
-        mock_get.return_value.text = "var _result=([]);"
+        mock_get.return_value.text = "null"
         result = fetch_reference_crude_prices(date(2025, 1, 17))
         assert result is None
 
     @patch("oilprice.prediction.requests.get")
-    def test_malformed_jsonp_returns_none(self, mock_get):
-        """JSONP格式异常返回 None"""
+    def test_malformed_response_returns_none(self, mock_get):
+        """格式异常的响应返回 None"""
         mock_get.return_value.status_code = 200
         mock_get.return_value.text = "invalid data without brackets"
         result = fetch_reference_crude_prices(date(2025, 1, 17))
