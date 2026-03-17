@@ -12,7 +12,7 @@
 
 import json
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 from loguru import logger
@@ -50,6 +50,15 @@ _SINA_KLINE_URL_PATTERNS = [
         "var%20_result=/InnerFuturesNewService.getDailyKLine?symbol={symbol}"
     ),
 ]
+
+# Yahoo Finance Chart API（获取国际期货历史收盘价，全球可用、稳定可靠）
+_YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+
+# Yahoo Finance 品种映射
+_YAHOO_SYMBOLS = {
+    "布伦特": "BZ=F",  # ICE Brent Crude Oil Futures
+    "WTI": "CL=F",  # NYMEX WTI Crude Oil Futures
+}
 
 # 已知调价参考日期（计算起点）
 _REFERENCE_DATE = date(2025, 1, 17)
@@ -210,7 +219,7 @@ def fetch_crude_oil_prices() -> list[CrudeOilPrice]:
                                 2,
                             )
                     except ValueError:
-                        logger.exception("解析前收盘价失败")
+                        logger.exception(f"{name}解析前收盘价失败，字段值: {fields[7]}")
 
                 prices.append(
                     CrudeOilPrice(
@@ -221,7 +230,7 @@ def fetch_crude_oil_prices() -> list[CrudeOilPrice]:
                     )
                 )
             except (IndexError, ValueError):
-                logger.exception("解析原油价格行失败")
+                logger.exception(f"解析原油价格行失败: {line[:100]}")
                 continue
 
         if prices:
@@ -327,7 +336,7 @@ def _parse_kline_json(text: str) -> list | None:
     return data if data else None
 
 
-def _fetch_kline_data(symbol: str, name: str) -> list | None:
+def _fetch_kline_from_sina(symbol: str, name: str) -> list | None:
     """从新浪财经获取期货K线数据，尝试多个API接口
 
     按优先级尝试 _SINA_KLINE_URL_PATTERNS 中的接口地址，
@@ -340,8 +349,6 @@ def _fetch_kline_data(symbol: str, name: str) -> list | None:
     Returns:
         K线数据列表，所有接口都失败时返回 None
     """
-    last_had_exception = False
-
     for url_tpl in _SINA_KLINE_URL_PATTERNS:
         url = url_tpl.format(symbol=symbol)
         try:
@@ -352,35 +359,182 @@ def _fetch_kline_data(symbol: str, name: str) -> list | None:
 
             data = _parse_kline_json(text)
             if data:
-                logger.info(f"{name}K线数据获取成功，共{len(data)}条记录")
+                logger.info(f"{name}新浪K线数据获取成功，共{len(data)}条记录")
                 return data
             else:
                 logger.debug(
-                    f"{name}K线接口返回空数据，尝试下一个接口。"
+                    f"{name}新浪K线接口返回空数据，尝试下一个接口。"
                     f"URL: {url}，响应前100字符: {text[:100]}"
                 )
         except (requests.RequestException, json.JSONDecodeError):
-            last_had_exception = True
-            logger.exception(f"{name}K线接口请求失败: {url}")
+            logger.exception(f"{name}新浪K线接口请求失败: {url}")
             continue
 
-    # 所有接口都失败
-    if last_had_exception:
-        logger.warning(f"获取{name}历史K线数据失败，所有接口均不可用")
-    else:
-        logger.warning(f"获取{name}历史K线数据失败，所有接口返回空数据")
+    logger.info(f"新浪财经{name}K线数据获取失败，将尝试Yahoo Finance")
+    return None
+
+
+def _fetch_kline_from_yahoo(name: str) -> list[dict] | None:
+    """从 Yahoo Finance Chart API 获取期货日K线数据
+
+    Yahoo Finance 是全球最稳定的免费金融数据源之一。
+    API 返回 JSON 格式的时间序列数据。
+
+    Args:
+        name: 品种中文名称（"布伦特" 或 "WTI"）
+
+    Returns:
+        标准化的K线数据列表 [{"day": "YYYY-MM-DD", "close": "xx.xx"}, ...]，
+        获取失败返回 None
+    """
+    yahoo_symbol = _YAHOO_SYMBOLS.get(name)
+    if not yahoo_symbol:
+        logger.debug(f"Yahoo Finance 无{name}对应品种映射")
+        return None
+
+    url = _YAHOO_CHART_URL.format(symbol=yahoo_symbol)
+    params = {
+        "range": "1mo",
+        "interval": "1d",
+        "includePrePost": "false",
+    }
+    headers = {
+        "User-Agent": _HEADERS["User-Agent"],
+    }
+
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=_TIMEOUT)
+        response.raise_for_status()
+        data = response.json()
+
+        chart = data.get("chart", {})
+        results = chart.get("result")
+        if not results:
+            error = chart.get("error")
+            logger.debug(f"Yahoo Finance {name}响应无数据: {error}")
+            return None
+
+        result = results[0]
+        timestamps = result.get("timestamp")
+        quotes = result.get("indicators", {}).get("quote", [{}])
+        if not quotes:
+            logger.debug(f"Yahoo Finance {name}无quote数据")
+            return None
+
+        closes = quotes[0].get("close", [])
+        if not timestamps or not closes:
+            logger.debug(f"Yahoo Finance {name}无时间或收盘价数据")
+            return None
+
+        # 转换为标准化K线格式
+        kline_data = []
+        for ts, close in zip(timestamps, closes):
+            if close is None:
+                continue
+            # Yahoo Finance 返回 UTC 时间戳
+            trade_date = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+            kline_data.append({"day": trade_date, "close": str(close)})
+
+        if kline_data:
+            logger.info(f"{name}Yahoo Finance K线数据获取成功，共{len(kline_data)}条记录")
+            return kline_data
+        else:
+            logger.debug(f"Yahoo Finance {name}解析后无有效K线数据")
+            return None
+
+    except (requests.RequestException, json.JSONDecodeError, KeyError):
+        logger.exception(f"Yahoo Finance {name}K线数据获取失败")
+        return None
+
+
+def _fetch_kline_data(symbol: str, name: str) -> list | None:
+    """获取期货K线数据，按优先级尝试多个数据源
+
+    数据源优先级:
+    1. Yahoo Finance Chart API（全球稳定可靠）
+    2. 新浪财经K线API（多接口回退）
+
+    Args:
+        symbol: 新浪期货品种代码（如 "hf_OIL"）
+        name: 品种中文名称（用于日志和Yahoo品种映射）
+
+    Returns:
+        K线数据列表，所有数据源都失败时返回 None
+    """
+    # 优先使用 Yahoo Finance（更稳定可靠）
+    yahoo_data = _fetch_kline_from_yahoo(name)
+    if yahoo_data:
+        return yahoo_data
+
+    # 回退到新浪财经
+    sina_data = _fetch_kline_from_sina(symbol, name)
+    if sina_data:
+        return sina_data
+
+    logger.warning(f"获取{name}历史K线数据失败，所有数据源均不可用")
+    return None
+
+
+def _find_closest_price(
+    data: list, ref_date: date, name: str, max_diff_days: int = 5
+) -> float | None:
+    """从K线数据中查找距离参考日期最近交易日的收盘价
+
+    Args:
+        data: K线数据列表（支持多种格式）
+        ref_date: 参考日期
+        name: 品种中文名称（用于日志）
+        max_diff_days: 最大容差天数
+
+    Returns:
+        收盘价，未找到合适数据返回 None
+    """
+    best_price = None
+    best_diff = None
+
+    for entry in data:
+        try:
+            if isinstance(entry, dict):
+                # 支持多种key格式: "day"/"date"/"d" 和 "close"/"c"
+                entry_date_str = (
+                    entry.get("day")
+                    or entry.get("date")
+                    or entry.get("d", "")
+                )
+                close_str = entry.get("close") or entry.get("c", "")
+            elif isinstance(entry, list) and len(entry) >= 5:
+                entry_date_str = str(entry[0])
+                close_str = str(entry[4])
+            else:
+                continue
+
+            if not entry_date_str or not close_str:
+                continue
+
+            entry_date = date.fromisoformat(entry_date_str)
+            close_price = float(close_str)
+            diff = abs((entry_date - ref_date).days)
+
+            if best_diff is None or diff < best_diff:
+                best_diff = diff
+                best_price = close_price
+        except (ValueError, TypeError):
+            logger.exception(f"解析{name}K线数据条目失败: {entry}")
+            continue
+
+    if best_price is not None and best_diff is not None and best_diff <= max_diff_days:
+        return best_price
     return None
 
 
 def fetch_reference_crude_prices(ref_date: date) -> dict[str, float] | None:
     """获取上次调价日期附近的原油收盘价作为基准价
 
-    从新浪财经日K线数据中查找距离参考日期最近交易日的收盘价。
-    自动尝试多个API接口（IndexService / InnerFuturesNewService）确保数据获取可靠。
+    按优先级尝试多个数据源获取K线数据:
+    1. Yahoo Finance Chart API（全球稳定可靠）
+    2. 新浪财经K线API（多接口回退）
 
-    K线数据格式（支持多种key名称）:
-    {"day":"2025-01-17","open":"74.00","high":"74.80","low":"73.50","close":"74.50","volume":"1200"}
-    或: {"date":"2025-01-17","open":"74.00",...,"close":"74.50",...}
+    从K线数据中查找距离参考日期最近交易日的收盘价。
 
     Args:
         ref_date: 参考日期（上次调价日）
@@ -396,43 +550,10 @@ def fetch_reference_crude_prices(ref_date: date) -> dict[str, float] | None:
         if not data:
             continue
 
-        # 查找距离参考日期最近交易日的收盘价（容差5个日历日）
-        best_price = None
-        best_diff = None
-
-        for entry in data:
-            try:
-                if isinstance(entry, dict):
-                    # 支持多种key格式: "day"/"date"/"d" 和 "close"/"c"
-                    entry_date_str = (
-                        entry.get("day")
-                        or entry.get("date")
-                        or entry.get("d", "")
-                    )
-                    close_str = entry.get("close") or entry.get("c", "")
-                elif isinstance(entry, list) and len(entry) >= 5:
-                    entry_date_str = str(entry[0])
-                    close_str = str(entry[4])
-                else:
-                    continue
-
-                entry_date = date.fromisoformat(entry_date_str)
-                close_price = float(close_str)
-                diff = abs((entry_date - ref_date).days)
-
-                if best_diff is None or diff < best_diff:
-                    best_diff = diff
-                    best_price = close_price
-            except (ValueError, TypeError):
-                logger.exception(f"解析{name}K线数据条目失败")
-                continue
-
-        if best_price is not None and best_diff is not None and best_diff <= 5:
-            ref_prices[name] = best_price
-            logger.info(
-                f"{name}上轮调价参考价: {best_price:.2f}美元/桶"
-                f"（距参考日{best_diff}天）"
-            )
+        price = _find_closest_price(data, ref_date, name)
+        if price is not None:
+            ref_prices[name] = price
+            logger.info(f"{name}上轮调价参考价: {price:.2f}美元/桶")
 
     if ref_prices:
         logger.info(f"获取到 {len(ref_prices)} 个品种的调价基准价")

@@ -15,6 +15,9 @@ from oilprice.prediction import (
     _add_working_days,
     _calculate_retail_price_impact,
     _fetch_kline_data,
+    _fetch_kline_from_sina,
+    _fetch_kline_from_yahoo,
+    _find_closest_price,
     _parse_kline_json,
     fetch_crude_oil_prices,
     fetch_exchange_rate,
@@ -303,8 +306,111 @@ class TestParseKlineJson:
         assert result is not None
 
 
-class TestFetchKlineData:
-    """测试K线数据获取（多接口回退）"""
+class TestFetchKlineFromYahoo:
+    """测试Yahoo Finance K线数据获取"""
+
+    @patch("oilprice.prediction.requests.get")
+    def test_parse_yahoo_response(self, mock_get):
+        """正常解析Yahoo Finance Chart API响应"""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "chart": {
+                "result": [{
+                    "timestamp": [1737072000, 1737158400, 1737244800],
+                    "indicators": {
+                        "quote": [{
+                            "close": [73.50, 74.00, 74.50],
+                            "open": [73.00, 73.50, 74.00],
+                            "high": [73.80, 74.20, 74.80],
+                            "low": [72.50, 73.00, 73.50],
+                            "volume": [1000, 1100, 1200],
+                        }]
+                    }
+                }]
+            }
+        }
+
+        result = _fetch_kline_from_yahoo("布伦特")
+
+        assert result is not None
+        assert len(result) == 3
+        # 验证标准化格式
+        assert "day" in result[0]
+        assert "close" in result[0]
+        assert float(result[2]["close"]) == 74.50
+
+    @patch("oilprice.prediction.requests.get")
+    def test_yahoo_null_close_skipped(self, mock_get):
+        """Yahoo Finance中close为null的数据点被跳过"""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "chart": {
+                "result": [{
+                    "timestamp": [1737072000, 1737158400, 1737244800],
+                    "indicators": {
+                        "quote": [{
+                            "close": [73.50, None, 74.50],
+                            "open": [73.00, 73.50, 74.00],
+                            "high": [73.80, 74.20, 74.80],
+                            "low": [72.50, 73.00, 73.50],
+                            "volume": [1000, 1100, 1200],
+                        }]
+                    }
+                }]
+            }
+        }
+
+        result = _fetch_kline_from_yahoo("WTI")
+
+        assert result is not None
+        assert len(result) == 2  # null数据点被跳过
+
+    @patch("oilprice.prediction.requests.get")
+    def test_yahoo_empty_result(self, mock_get):
+        """Yahoo Finance返回空result"""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "chart": {"result": None}
+        }
+
+        result = _fetch_kline_from_yahoo("布伦特")
+        assert result is None
+
+    @patch("oilprice.prediction.requests.get")
+    def test_yahoo_network_error(self, mock_get):
+        """Yahoo Finance网络错误返回None"""
+        import requests
+        mock_get.side_effect = requests.ConnectionError("Connection refused")
+
+        result = _fetch_kline_from_yahoo("布伦特")
+        assert result is None
+
+    def test_yahoo_unknown_symbol(self):
+        """未知品种返回None"""
+        result = _fetch_kline_from_yahoo("未知品种")
+        assert result is None
+
+    @patch("oilprice.prediction.requests.get")
+    def test_yahoo_no_timestamps(self, mock_get):
+        """Yahoo Finance无时间戳数据"""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "chart": {
+                "result": [{
+                    "timestamp": None,
+                    "indicators": {
+                        "quote": [{"close": [74.50]}]
+                    }
+                }]
+            }
+        }
+
+        result = _fetch_kline_from_yahoo("布伦特")
+        assert result is None
+
+
+class TestFetchKlineFromSina:
+    """测试新浪财经K线数据获取"""
 
     @patch("oilprice.prediction.requests.get")
     def test_first_url_succeeds(self, mock_get):
@@ -312,17 +418,15 @@ class TestFetchKlineData:
         mock_get.return_value.status_code = 200
         mock_get.return_value.text = '[{"day":"2025-01-17","close":"74.50"}]'
 
-        result = _fetch_kline_data("hf_OIL", "布伦特")
+        result = _fetch_kline_from_sina("hf_OIL", "布伦特")
 
         assert result is not None
         assert len(result) == 1
-        # 应该只调用了一次（第一个URL成功，不尝试第二个）
         assert mock_get.call_count == 1
 
     @patch("oilprice.prediction.requests.get")
     def test_fallback_to_second_url(self, mock_get):
         """第一个接口返回null时，回退到第二个接口"""
-        # 第一次调用返回null，第二次返回有效数据
         response_null = MagicMock()
         response_null.status_code = 200
         response_null.text = "null"
@@ -335,21 +439,11 @@ class TestFetchKlineData:
 
         mock_get.side_effect = [response_null, response_ok]
 
-        result = _fetch_kline_data("hf_OIL", "布伦特")
+        result = _fetch_kline_from_sina("hf_OIL", "布伦特")
 
         assert result is not None
         assert len(result) == 1
         assert mock_get.call_count == 2
-
-    @patch("oilprice.prediction.requests.get")
-    def test_all_urls_fail_network(self, mock_get):
-        """所有接口都网络错误返回None"""
-        import requests
-        mock_get.side_effect = requests.ConnectionError("Connection refused")
-
-        result = _fetch_kline_data("hf_OIL", "布伦特")
-
-        assert result is None
 
     @patch("oilprice.prediction.requests.get")
     def test_all_urls_return_null(self, mock_get):
@@ -357,28 +451,58 @@ class TestFetchKlineData:
         mock_get.return_value.status_code = 200
         mock_get.return_value.text = "null"
 
-        result = _fetch_kline_data("hf_OIL", "布伦特")
-
+        result = _fetch_kline_from_sina("hf_OIL", "布伦特")
         assert result is None
 
-    @patch("oilprice.prediction.requests.get")
-    def test_first_url_error_second_succeeds(self, mock_get):
-        """第一个接口网络错误，第二个接口成功"""
-        import requests
 
-        response_ok = MagicMock()
-        response_ok.status_code = 200
-        response_ok.text = '[{"day":"2025-01-17","close":"74.50"}]'
+class TestFetchKlineData:
+    """测试K线数据获取（多数据源回退）"""
 
-        mock_get.side_effect = [
-            requests.ConnectionError("Connection refused"),
-            response_ok,
-        ]
+    @patch("oilprice.prediction._fetch_kline_from_sina")
+    @patch("oilprice.prediction._fetch_kline_from_yahoo")
+    def test_yahoo_succeeds(self, mock_yahoo, mock_sina):
+        """Yahoo Finance成功时直接返回，不调用Sina"""
+        mock_yahoo.return_value = [{"day": "2025-01-17", "close": "74.50"}]
 
         result = _fetch_kline_data("hf_OIL", "布伦特")
 
         assert result is not None
         assert len(result) == 1
+        mock_sina.assert_not_called()
+
+    @patch("oilprice.prediction._fetch_kline_from_sina")
+    @patch("oilprice.prediction._fetch_kline_from_yahoo")
+    def test_yahoo_fails_sina_succeeds(self, mock_yahoo, mock_sina):
+        """Yahoo Finance失败时回退到Sina"""
+        mock_yahoo.return_value = None
+        mock_sina.return_value = [{"day": "2025-01-17", "close": "74.50"}]
+
+        result = _fetch_kline_data("hf_OIL", "布伦特")
+
+        assert result is not None
+        mock_yahoo.assert_called_once()
+        mock_sina.assert_called_once_with("hf_OIL", "布伦特")
+
+    @patch("oilprice.prediction._fetch_kline_from_sina")
+    @patch("oilprice.prediction._fetch_kline_from_yahoo")
+    def test_all_sources_fail(self, mock_yahoo, mock_sina):
+        """所有数据源都失败返回None"""
+        mock_yahoo.return_value = None
+        mock_sina.return_value = None
+
+        result = _fetch_kline_data("hf_OIL", "布伦特")
+
+        assert result is None
+
+    @patch("oilprice.prediction.requests.get")
+    def test_all_urls_fail_network(self, mock_get):
+        """所有接口都网络错误返回None（集成测试）"""
+        import requests
+        mock_get.side_effect = requests.ConnectionError("Connection refused")
+
+        result = _fetch_kline_data("hf_OIL", "布伦特")
+
+        assert result is None
 
 
 class TestFetchReferenceCrudePrices:
@@ -487,6 +611,79 @@ class TestFetchReferenceCrudePrices:
         mock_get.return_value.text = "invalid data without brackets"
         result = fetch_reference_crude_prices(date(2025, 1, 17))
         assert result is None
+
+
+class TestFindClosestPrice:
+    """测试K线数据中查找最近收盘价"""
+
+    def test_exact_date_match(self):
+        """精确匹配参考日期"""
+        data = [
+            {"day": "2025-01-16", "close": "73.80"},
+            {"day": "2025-01-17", "close": "74.50"},
+        ]
+        result = _find_closest_price(data, date(2025, 1, 17), "布伦特")
+        assert result == 74.50
+
+    def test_nearest_date_within_threshold(self):
+        """参考日期无精确匹配但在容差范围内"""
+        data = [
+            {"day": "2025-01-16", "close": "73.80"},
+            {"day": "2025-01-17", "close": "74.50"},
+        ]
+        # Jan 18 is Saturday, should match Jan 17 (1 day away)
+        result = _find_closest_price(data, date(2025, 1, 18), "布伦特")
+        assert result == 74.50
+
+    def test_beyond_threshold_returns_none(self):
+        """超过容差天数返回None"""
+        data = [
+            {"day": "2025-01-10", "close": "73.50"},
+        ]
+        # Jan 20 is 10 days away from Jan 10 (> 5 day threshold)
+        result = _find_closest_price(data, date(2025, 1, 20), "布伦特")
+        assert result is None
+
+    def test_empty_data(self):
+        """空数据返回None"""
+        result = _find_closest_price([], date(2025, 1, 17), "布伦特")
+        assert result is None
+
+    def test_short_key_format(self):
+        """支持d/c短键名格式"""
+        data = [{"d": "2025-01-17", "c": "74.50"}]
+        result = _find_closest_price(data, date(2025, 1, 17), "布伦特")
+        assert result == 74.50
+
+    def test_date_key_format(self):
+        """支持date键名格式"""
+        data = [{"date": "2025-01-17", "close": "74.50"}]
+        result = _find_closest_price(data, date(2025, 1, 17), "布伦特")
+        assert result == 74.50
+
+    def test_list_entry_format(self):
+        """支持列表格式数据"""
+        data = [["2025-01-17", "74.00", "74.80", "73.50", "74.50", "1200"]]
+        result = _find_closest_price(data, date(2025, 1, 17), "布伦特")
+        assert result == 74.50
+
+    def test_custom_max_diff(self):
+        """自定义最大容差天数"""
+        data = [{"day": "2025-01-10", "close": "73.50"}]
+        # Default 5 days: 10 days away → None
+        assert _find_closest_price(data, date(2025, 1, 20), "布伦特") is None
+        # With 15 days: 10 days away → found
+        assert _find_closest_price(data, date(2025, 1, 20), "布伦特", max_diff_days=15) == 73.50
+
+    def test_empty_close_string_skipped(self):
+        """close为空字符串的条目被跳过"""
+        data = [
+            {"day": "2025-01-16", "close": ""},
+            {"day": "2025-01-17", "close": "74.50"},
+        ]
+        result = _find_closest_price(data, date(2025, 1, 16), "布伦特")
+        # Jan 16 has empty close, but Jan 17 is within range
+        assert result == 74.50
 
 
 class TestCalculateRetailPriceImpact:
