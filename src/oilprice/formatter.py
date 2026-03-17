@@ -44,11 +44,17 @@ def format_message(data: OilPriceData, province: str) -> tuple[str, str]:
         # 未找到指定省份，显示提示
         lines.append(f"⚠️ 未找到 {province} 的油价数据")
 
-    # 油价调整信息
+    # 油价调整信息（来自汽油价格网）
     if data.adjustment:
         lines.append("")
         lines.append(f"📢 {data.adjustment.summary}")
         lines.append(f"  {data.adjustment.detail}")
+
+    # 自定义算法预测（来自国际油价分析）
+    if data.prediction:
+        lines.append("")
+        lines.append(f"🔮 {data.prediction.summary}")
+        lines.append(f"  {data.prediction.detail}")
 
     # 全国油价对比（显示最低和最高）
     if len(data.prices) > 1:

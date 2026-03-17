@@ -48,6 +48,45 @@ class TestFormatMessage:
         assert "新疆" in desc  # 92# 最低
         assert "海南" in desc  # 92# 最高
 
+    def test_format_with_prediction(self, sample_prices):
+        """消息中包含自定义算法预测"""
+        from oilprice.scraper import AdjustmentInfo, OilPriceData
+
+        prediction = AdjustmentInfo(
+            summary="下次油价4月1日24时调整",
+            detail="国际油价呈上涨趋势，预计油价上调约0.10元/升",
+        )
+        data = OilPriceData(
+            prices=sample_prices, adjustment=None, prediction=prediction
+        )
+        _, desc = format_message(data, "广东")
+
+        assert "🔮" in desc
+        assert "4月1日" in desc
+        assert "上涨" in desc
+
+    def test_format_with_both(self, sample_prices):
+        """同时包含调价信息和自定义预测"""
+        from oilprice.scraper import AdjustmentInfo, OilPriceData
+
+        adjustment = AdjustmentInfo(
+            summary="下次油价3月20日24时调整",
+            detail="油价上涨0.55元/升",
+        )
+        prediction = AdjustmentInfo(
+            summary="下次油价3月20日24时调整",
+            detail="国际油价呈上涨趋势，预计油价上调约0.10元/升",
+        )
+        data = OilPriceData(
+            prices=sample_prices, adjustment=adjustment, prediction=prediction
+        )
+        _, desc = format_message(data, "广东")
+
+        assert "📢" in desc
+        assert "🔮" in desc
+        assert "0.55" in desc
+        assert "国际油价" in desc
+
 
 class TestGetProvinceCn:
     """测试省份名称转换"""
