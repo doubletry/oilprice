@@ -54,7 +54,8 @@ class OilPriceData:
     """完整的油价数据"""
 
     prices: list[OilPrice]  # 各省份油价列表
-    adjustment: AdjustmentInfo | None  # 调价预测（可能获取失败）
+    adjustment: AdjustmentInfo | None  # 来自汽油价格网的调价信息
+    prediction: AdjustmentInfo | None = None  # 来自自定义算法的调价预测
 
 
 def fetch_page(url: str) -> BeautifulSoup | None:
@@ -159,10 +160,17 @@ def parse_adjustment_from_qiyoujiage(soup: BeautifulSoup) -> AdjustmentInfo | No
     return None
 
 
-def scrape_oil_prices() -> OilPriceData:
+def scrape_oil_prices(prediction_mode: str = "fallback") -> OilPriceData:
     """抓取完整的油价数据
 
-    从汽车之家获取实时油价，从汽油价格网获取调价预测信息。
+    从汽车之家获取实时油价，根据 prediction_mode 决定调价预测的获取方式。
+
+    Args:
+        prediction_mode: 预测模式
+            - "qiyoujiage": 仅使用汽油价格网
+            - "custom": 仅使用自定义算法（基于国际油价）
+            - "fallback": 优先汽油价格网，失败时用自定义算法（默认）
+            - "both": 同时获取两个来源
 
     Returns:
         OilPriceData 完整油价数据
@@ -182,21 +190,54 @@ def scrape_oil_prices() -> OilPriceData:
 
     logger.info(f"成功获取 {len(prices)} 个省份的油价数据")
 
-    # 2. 从汽油价格网获取调价预测（补充数据源，允许失败）
     adjustment = None
-    logger.info("正在从汽油价格网获取调价预测信息...")
-    qiyoujiage_soup = fetch_page(QIYOUJIAGE_URL)
-    if qiyoujiage_soup:
-        adjustment = parse_adjustment_from_qiyoujiage(qiyoujiage_soup)
-        if adjustment:
-            logger.info(f"调价信息: {adjustment.summary} {adjustment.detail}")
-        else:
-            logger.warning("未能获取调价预测信息，将仅推送实时油价")
-    else:
-        logger.warning("无法访问汽油价格网，将仅推送实时油价")
+    prediction = None
 
-    # 3. 若未获取到调价信息，使用自动生成的预测作为备选
-    if adjustment is None:
+    # 2. 根据模式获取调价预测
+    # 需要从汽油价格网获取的模式
+    if prediction_mode in ("qiyoujiage", "fallback", "both"):
+        logger.info("正在从汽油价格网获取调价预测信息...")
+        qiyoujiage_soup = fetch_page(QIYOUJIAGE_URL)
+        if qiyoujiage_soup:
+            adjustment = parse_adjustment_from_qiyoujiage(qiyoujiage_soup)
+            if adjustment:
+                logger.info(f"调价信息: {adjustment.summary} {adjustment.detail}")
+            else:
+                logger.warning("未能获取调价预测信息")
+        else:
+            logger.warning("无法访问汽油价格网")
+
+    # 需要使用自定义算法的模式
+    if prediction_mode == "custom":
+        # 仅使用自定义算法
+        logger.info("正在使用自定义算法生成调价预测...")
+        try:
+            from .prediction import generate_prediction
+
+            prediction = generate_prediction()
+            if prediction:
+                logger.info(
+                    f"自动生成调价预测: {prediction.summary} {prediction.detail}"
+                )
+        except Exception as e:
+            logger.warning(f"自动生成调价预测失败: {e}")
+
+    elif prediction_mode == "both":
+        # 同时获取自定义算法预测
+        logger.info("正在使用自定义算法生成调价预测...")
+        try:
+            from .prediction import generate_prediction
+
+            prediction = generate_prediction()
+            if prediction:
+                logger.info(
+                    f"自动生成调价预测: {prediction.summary} {prediction.detail}"
+                )
+        except Exception as e:
+            logger.warning(f"自动生成调价预测失败: {e}")
+
+    elif prediction_mode == "fallback" and adjustment is None:
+        # 汽油价格网失败时，回退到自定义算法
         logger.info("尝试自动生成调价预测信息...")
         try:
             from .prediction import generate_prediction
@@ -209,4 +250,4 @@ def scrape_oil_prices() -> OilPriceData:
         except Exception as e:
             logger.warning(f"自动生成调价预测失败: {e}")
 
-    return OilPriceData(prices=prices, adjustment=adjustment)
+    return OilPriceData(prices=prices, adjustment=adjustment, prediction=prediction)

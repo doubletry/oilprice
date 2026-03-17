@@ -22,7 +22,7 @@ def run(config: Config | None = None) -> bool:
 
     # 1. 抓取油价数据
     logger.info("开始抓取油价数据...")
-    data = scrape_oil_prices()
+    data = scrape_oil_prices(prediction_mode=config.prediction_mode)
 
     # 2. 格式化消息
     province_cn = get_province_cn(config.province)
@@ -46,7 +46,9 @@ def main():
     """CLI 入口函数"""
     import argparse
 
-    parser = argparse.ArgumentParser(description="油价监控 - 查询实时油价并推送到企业微信")
+    parser = argparse.ArgumentParser(
+        description="油价监控 - 查询实时油价并推送到企业微信"
+    )
     parser.add_argument(
         "--env",
         type=str,
@@ -64,7 +66,7 @@ def main():
 
     if args.dry_run:
         # 仅查询和展示，不推送
-        data = scrape_oil_prices()
+        data = scrape_oil_prices(prediction_mode=config.prediction_mode)
         province_cn = get_province_cn(config.province)
         title, description = format_message(data, province_cn)
         print(f"\n{'='*40}")
