@@ -69,8 +69,9 @@ class TestGetNextAdjustmentDate:
 
     def test_default_uses_today(self):
         """不传参数使用系统日期"""
-        result = get_next_adjustment_date()
-        assert result >= date.today()
+        today = date.today()
+        result = get_next_adjustment_date(today)
+        assert result >= today
 
 
 class TestFetchCrudeOilPrices:

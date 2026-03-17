@@ -160,6 +160,27 @@ def parse_adjustment_from_qiyoujiage(soup: BeautifulSoup) -> AdjustmentInfo | No
     return None
 
 
+def _try_generate_prediction() -> AdjustmentInfo | None:
+    """尝试使用自定义算法生成调价预测
+
+    Returns:
+        调价预测信息，失败返回 None
+    """
+    logger.info("正在使用自定义算法生成调价预测...")
+    try:
+        from .prediction import generate_prediction
+
+        prediction = generate_prediction()
+        if prediction:
+            logger.info(
+                f"自动生成调价预测: {prediction.summary} {prediction.detail}"
+            )
+        return prediction
+    except Exception as e:
+        logger.warning(f"自动生成调价预测失败: {e}")
+        return None
+
+
 def scrape_oil_prices(prediction_mode: str = "fallback") -> OilPriceData:
     """抓取完整的油价数据
 
@@ -209,45 +230,13 @@ def scrape_oil_prices(prediction_mode: str = "fallback") -> OilPriceData:
 
     # 需要使用自定义算法的模式
     if prediction_mode == "custom":
-        # 仅使用自定义算法
-        logger.info("正在使用自定义算法生成调价预测...")
-        try:
-            from .prediction import generate_prediction
-
-            prediction = generate_prediction()
-            if prediction:
-                logger.info(
-                    f"自动生成调价预测: {prediction.summary} {prediction.detail}"
-                )
-        except Exception as e:
-            logger.warning(f"自动生成调价预测失败: {e}")
+        prediction = _try_generate_prediction()
 
     elif prediction_mode == "both":
-        # 同时获取自定义算法预测
-        logger.info("正在使用自定义算法生成调价预测...")
-        try:
-            from .prediction import generate_prediction
-
-            prediction = generate_prediction()
-            if prediction:
-                logger.info(
-                    f"自动生成调价预测: {prediction.summary} {prediction.detail}"
-                )
-        except Exception as e:
-            logger.warning(f"自动生成调价预测失败: {e}")
+        prediction = _try_generate_prediction()
 
     elif prediction_mode == "fallback" and adjustment is None:
         # 汽油价格网失败时，回退到自定义算法
-        logger.info("尝试自动生成调价预测信息...")
-        try:
-            from .prediction import generate_prediction
-
-            adjustment = generate_prediction()
-            if adjustment:
-                logger.info(
-                    f"自动生成调价预测: {adjustment.summary} {adjustment.detail}"
-                )
-        except Exception as e:
-            logger.warning(f"自动生成调价预测失败: {e}")
+        prediction = _try_generate_prediction()
 
     return OilPriceData(prices=prices, adjustment=adjustment, prediction=prediction)
