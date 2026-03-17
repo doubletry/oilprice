@@ -67,8 +67,11 @@ PREDICTION_MODE=fallback
 ### 3. Run
 
 ```bash
-# Query oil prices and push to WeChat
+# Method 1: Run as module (recommended)
 poetry run python -m oilprice
+
+# Method 2: Run entry file directly
+poetry run python src/main.py
 
 # Query and display only, without sending messages
 poetry run python -m oilprice --dry-run
@@ -121,15 +124,17 @@ poetry run python -m oilprice --env /path/to/.env
 ## Project Structure
 
 ```
-src/oilprice/
-├── __init__.py      # Package entry point
-├── __main__.py      # python -m oilprice support
-├── main.py          # CLI entry point and main flow
-├── config.py        # .env configuration loader
-├── scraper.py       # Oil price data scraping and parsing
-├── prediction.py    # Price adjustment prediction based on international crude oil
-├── formatter.py     # Message content formatting
-└── notifier.py      # WeCom message push
+src/
+├── main.py              # Top-level entry (direct execution and Nuitka build entry)
+└── oilprice/
+    ├── __init__.py      # Package entry point
+    ├── __main__.py      # python -m oilprice support
+    ├── main.py          # CLI entry point and main flow
+    ├── config.py        # .env configuration loader
+    ├── scraper.py       # Oil price data scraping and parsing
+    ├── prediction.py    # Price adjustment prediction based on international crude oil
+    ├── formatter.py     # Message content formatting
+    └── notifier.py      # WeCom message push
 
 tests/
 ├── conftest.py       # Test fixtures and mock data

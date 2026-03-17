@@ -67,8 +67,11 @@ PREDICTION_MODE=fallback
 ### 3. 运行
 
 ```bash
-# 查询油价并推送到微信
+# 方式一：模块方式运行（推荐）
 poetry run python -m oilprice
+
+# 方式二：直接运行入口文件
+poetry run python src/main.py
 
 # 仅查询展示，不发送消息
 poetry run python -m oilprice --dry-run
@@ -121,15 +124,17 @@ poetry run python -m oilprice --env /path/to/.env
 ## 项目结构
 
 ```
-src/oilprice/
-├── __init__.py      # 包入口
-├── __main__.py      # python -m oilprice 支持
-├── main.py          # CLI 入口和主流程
-├── config.py        # .env 配置加载
-├── scraper.py       # 油价数据抓取与解析
-├── prediction.py    # 基于国际油价的调价预测算法
-├── formatter.py     # 消息内容格式化
-└── notifier.py      # 企业微信消息推送
+src/
+├── main.py              # 顶层入口（直接运行和 Nuitka 编译入口）
+└── oilprice/
+    ├── __init__.py      # 包入口
+    ├── __main__.py      # python -m oilprice 支持
+    ├── main.py          # CLI 入口和主流程
+    ├── config.py        # .env 配置加载
+    ├── scraper.py       # 油价数据抓取与解析
+    ├── prediction.py    # 基于国际油价的调价预测算法
+    ├── formatter.py     # 消息内容格式化
+    └── notifier.py      # 企业微信消息推送
 
 tests/
 ├── conftest.py       # 测试 fixtures 和模拟数据
