@@ -18,11 +18,12 @@ class TestFormatMessage:
         assert "7.30" in desc  # 0# 柴油
 
     def test_format_with_adjustment(self, sample_oil_data):
-        """消息中包含调价信息"""
+        """消息中包含调价信息及来源标识"""
         _, desc = format_message(sample_oil_data, "广东")
 
         assert "3月20日" in desc
         assert "上涨" in desc
+        assert "来源:汽油价格网" in desc
 
     def test_format_without_adjustment(self, sample_oil_data_no_adjustment):
         """无调价信息时不报错"""
@@ -49,7 +50,7 @@ class TestFormatMessage:
         assert "海南" in desc  # 92# 最高
 
     def test_format_with_prediction(self, sample_prices):
-        """消息中包含自定义算法预测"""
+        """消息中包含自定义算法预测及来源标识"""
         from oilprice.scraper import AdjustmentInfo, OilPriceData
 
         prediction = AdjustmentInfo(
@@ -64,9 +65,10 @@ class TestFormatMessage:
         assert "🔮" in desc
         assert "4月1日" in desc
         assert "上涨" in desc
+        assert "来源:算法预测" in desc
 
     def test_format_with_both(self, sample_prices):
-        """同时包含调价信息和自定义预测"""
+        """同时包含调价信息和自定义预测，各有来源标识"""
         from oilprice.scraper import AdjustmentInfo, OilPriceData
 
         adjustment = AdjustmentInfo(
@@ -86,6 +88,8 @@ class TestFormatMessage:
         assert "🔮" in desc
         assert "0.55" in desc
         assert "国际油价" in desc
+        assert "来源:汽油价格网" in desc
+        assert "来源:算法预测" in desc
 
 
 class TestGetProvinceCn:

@@ -49,12 +49,14 @@ def format_message(data: OilPriceData, province: str) -> tuple[str, str]:
         lines.append("")
         lines.append(f"📢 {data.adjustment.summary}")
         lines.append(f"  {data.adjustment.detail}")
+        lines.append("  (来源:汽油价格网)")
 
     # 自定义算法预测（来自国际油价分析）
     if data.prediction:
         lines.append("")
         lines.append(f"🔮 {data.prediction.summary}")
         lines.append(f"  {data.prediction.detail}")
+        lines.append("  (来源:算法预测)")
 
     # 全国油价对比（显示最低和最高）
     if len(data.prices) > 1:
