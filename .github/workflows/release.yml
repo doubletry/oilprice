@@ -54,27 +54,33 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
         with:
           python-version: "3.12"
 
       - name: Install Poetry
+        if: runner.os == 'Windows'
         run: pipx install poetry
 
       - name: Install dependencies
+        if: runner.os == 'Windows'
         run: poetry install
 
       # Linux: 在兼容旧 GLIBC 的容器中构建，确保兼容 Debian 10+ (GLIBC 2.28+)
       - name: Build with Nuitka (Linux)
         if: runner.os == 'Linux'
         run: |
-          docker run --rm -v "${{ github.workspace }}:/workspace" -w /workspace \
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -v "${{ github.workspace }}:/workspace" -w /workspace \
             quay.io/pypa/manylinux_2_28_x86_64 \
             bash -c '
               set -e
               export PATH="/opt/python/cp312-cp312/bin:$PATH"
-              pip install poetry
+              export HOME=/tmp
+              pip install --user poetry
+              export PATH="/tmp/.local/bin:$PATH"
               poetry install --no-interaction
-              pip install patchelf
+              pip install --user patchelf
               chmod +x build.sh
               bash build.sh ${{ matrix.artifact_name }}
             '
