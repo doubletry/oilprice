@@ -305,6 +305,14 @@ class TestParseKlineJson:
         result = _parse_kline_json(text)
         assert result is not None
 
+    def test_malformed_json_returns_none(self):
+        """损坏的JSON返回None而非抛出异常"""
+        assert _parse_kline_json("[{broken json") is None
+
+    def test_malformed_jsonp_returns_none(self):
+        """损坏的JSONP包装返回None"""
+        assert _parse_kline_json("var _result=([{broken);") is None
+
 
 class TestFetchKlineFromYahoo:
     """测试Yahoo Finance K线数据获取"""

@@ -272,7 +272,7 @@ def fetch_exchange_rate() -> float:
             logger.warning("汇率API未返回有效数据")
             return _DEFAULT_EXCHANGE_RATE
 
-        # 遍历字段查找合理的汇率值（应在 1~100 之间，或百倍值 100~1000）
+        # 遍历字段查找合理的汇率值（直接值 1~15，或百倍值 100~1500）
         rate = None
         for field in fields:
             field = field.strip()
@@ -320,20 +320,24 @@ def _parse_kline_json(text: str) -> list | None:
     if not text or text == "null":
         return None
 
-    # 纯JSON数组: [...]
-    if text.startswith("["):
-        data = json.loads(text)
+    try:
+        # 纯JSON数组: [...]
+        if text.startswith("["):
+            data = json.loads(text)
+            return data if data else None
+
+        # JSONP包装: var _result=([...]); 或类似格式
+        start_idx = text.find("[")
+        end_idx = text.rfind("]")
+        if start_idx < 0 or end_idx < 0:
+            return None
+
+        json_str = text[start_idx : end_idx + 1]
+        data = json.loads(json_str)
         return data if data else None
-
-    # JSONP包装: var _result=([...]); 或类似格式
-    start_idx = text.find("[")
-    end_idx = text.rfind("]")
-    if start_idx < 0 or end_idx < 0:
+    except json.JSONDecodeError:
+        logger.debug(f"K线数据JSON解析失败: {text[:100]}")
         return None
-
-    json_str = text[start_idx : end_idx + 1]
-    data = json.loads(json_str)
-    return data if data else None
 
 
 def _fetch_kline_from_sina(symbol: str, name: str) -> list | None:
@@ -366,11 +370,11 @@ def _fetch_kline_from_sina(symbol: str, name: str) -> list | None:
                     f"{name}新浪K线接口返回空数据，尝试下一个接口。"
                     f"URL: {url}，响应前100字符: {text[:100]}"
                 )
-        except (requests.RequestException, json.JSONDecodeError):
+        except requests.RequestException:
             logger.exception(f"{name}新浪K线接口请求失败: {url}")
             continue
 
-    logger.info(f"新浪财经{name}K线数据获取失败，将尝试Yahoo Finance")
+    logger.info(f"新浪财经{name}K线数据获取失败")
     return None
 
 
