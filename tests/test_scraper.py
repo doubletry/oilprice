@@ -8,12 +8,19 @@ from bs4 import BeautifulSoup
 from oilprice.scraper import (
     AdjustmentInfo,
     OilPrice,
-    _try_generate_prediction,
     parse_adjustment_from_qiyoujiage,
     parse_prices_from_autohome,
     scrape_oil_prices,
 )
-from tests.conftest import AUTOHOME_HTML, QIYOUJIAGE_HTML, QIYOUJIAGE_HTML_EMPTY
+from tests.conftest import (
+    AUTOHOME_HTML,
+    QIYOUJIAGE_HTML,
+    QIYOUJIAGE_HTML_DOWN,
+    QIYOUJIAGE_HTML_EMPTY,
+    QIYOUJIAGE_HTML_OLD,
+    QIYOUJIAGE_HTML_OLD_DOWN,
+    QIYOUJIAGE_HTML_SHELVED,
+)
 
 
 class TestParsePricesFromAutohome:
@@ -57,15 +64,56 @@ class TestParsePricesFromAutohome:
 class TestParseAdjustmentFromQiyoujiage:
     """测试汽油价格网调价信息解析"""
 
-    def test_parse_adjustment_info(self):
-        """正常解析调价信息"""
+    def test_parse_new_format_up(self):
+        """解析新格式: 预计上调油价XXX元/吨"""
         soup = BeautifulSoup(QIYOUJIAGE_HTML, "html.parser")
         info = parse_adjustment_from_qiyoujiage(soup)
 
         assert info is not None
-        assert "3月20日" in info.summary
+        assert "3月23日" in info.summary
         assert "调整" in info.summary
+        assert "预计上调油价" in info.detail
+        assert "1900元/吨" in info.detail
+        assert "1.44元/升-1.72元/升" in info.detail
+
+    def test_parse_new_format_down(self):
+        """解析新格式: 预计下调油价XXX元/吨"""
+        soup = BeautifulSoup(QIYOUJIAGE_HTML_DOWN, "html.parser")
+        info = parse_adjustment_from_qiyoujiage(soup)
+
+        assert info is not None
+        assert "4月1日" in info.summary
+        assert "预计下调油价" in info.detail
+        assert "200元/吨" in info.detail
+
+    def test_parse_old_format_up(self):
+        """解析旧格式: 油价上涨X.XX元/升"""
+        soup = BeautifulSoup(QIYOUJIAGE_HTML_OLD, "html.parser")
+        info = parse_adjustment_from_qiyoujiage(soup)
+
+        assert info is not None
+        assert "3月20日" in info.summary
         assert "上涨" in info.detail
+        assert "0.55元/升" in info.detail
+
+    def test_parse_old_format_down(self):
+        """解析旧格式: 油价下跌X.XX元/升"""
+        soup = BeautifulSoup(QIYOUJIAGE_HTML_OLD_DOWN, "html.parser")
+        info = parse_adjustment_from_qiyoujiage(soup)
+
+        assert info is not None
+        assert "4月1日" in info.summary
+        assert "下跌" in info.detail
+        assert "0.15元/升" in info.detail
+
+    def test_parse_shelved(self):
+        """解析搁浅/不调整"""
+        soup = BeautifulSoup(QIYOUJIAGE_HTML_SHELVED, "html.parser")
+        info = parse_adjustment_from_qiyoujiage(soup)
+
+        assert info is not None
+        assert "4月15日" in info.summary
+        assert "不调整" in info.detail or "搁浅" in info.detail
 
     def test_no_adjustment_info(self):
         """无调价信息返回 None"""
@@ -97,79 +145,27 @@ _FAKE_PREDICTION = AdjustmentInfo(
 
 
 class TestScrapeOilPrices:
-    """测试 scrape_oil_prices 不同预测模式"""
+    """测试 scrape_oil_prices"""
 
     @patch("oilprice.scraper.fetch_page")
-    def test_qiyoujiage_mode_only_scrapes(self, mock_fetch):
-        """qiyoujiage 模式仅使用汽油价格网"""
+    def test_normal_flow(self, mock_fetch):
+        """正常流程: 获取油价和调价信息"""
         mock_fetch.side_effect = [_mock_autohome_soup(), _mock_qiyoujiage_soup()]
 
-        result = scrape_oil_prices("qiyoujiage")
+        result = scrape_oil_prices()
 
         assert result.adjustment is not None
-        assert result.prediction is None
         assert len(result.prices) > 0
 
-    @patch("oilprice.scraper._try_generate_prediction", return_value=_FAKE_PREDICTION)
     @patch("oilprice.scraper.fetch_page")
-    def test_custom_mode_only_uses_algorithm(self, mock_fetch, mock_predict):
-        """custom 模式仅使用自定义算法"""
-        mock_fetch.return_value = _mock_autohome_soup()
-
-        result = scrape_oil_prices("custom")
-
-        assert result.adjustment is None
-        assert result.prediction is not None
-        assert "上涨趋势" in result.prediction.detail
-        mock_predict.assert_called_once()
-
-    @patch("oilprice.scraper._try_generate_prediction", return_value=_FAKE_PREDICTION)
-    @patch("oilprice.scraper.fetch_page")
-    def test_both_mode_fetches_both(self, mock_fetch, mock_predict):
-        """both 模式同时获取两个来源"""
-        mock_fetch.side_effect = [_mock_autohome_soup(), _mock_qiyoujiage_soup()]
-
-        result = scrape_oil_prices("both")
-
-        assert result.adjustment is not None
-        assert result.prediction is not None
-        mock_predict.assert_called_once()
-
-    @patch("oilprice.scraper.fetch_page")
-    def test_fallback_mode_uses_qiyoujiage_when_available(self, mock_fetch):
-        """fallback 模式优先使用汽油价格网"""
-        mock_fetch.side_effect = [_mock_autohome_soup(), _mock_qiyoujiage_soup()]
-
-        result = scrape_oil_prices("fallback")
-
-        assert result.adjustment is not None
-        assert result.prediction is None
-
-    @patch("oilprice.scraper._try_generate_prediction", return_value=_FAKE_PREDICTION)
-    @patch("oilprice.scraper.fetch_page")
-    def test_fallback_mode_uses_algorithm_when_scrape_fails(
-        self, mock_fetch, mock_predict
-    ):
-        """fallback 模式: 汽油价格网失败时回退到自定义算法"""
+    def test_qiyoujiage_unavailable(self, mock_fetch):
+        """汽油价格网不可用时仅返回油价"""
         mock_fetch.side_effect = [_mock_autohome_soup(), None]
 
-        result = scrape_oil_prices("fallback")
-
-        # 汽油价格网失败 → adjustment 保持 None，prediction 来自算法
-        assert result.adjustment is None
-        assert result.prediction is not None
-        mock_predict.assert_called_once()
-
-    @patch("oilprice.scraper._try_generate_prediction", return_value=None)
-    @patch("oilprice.scraper.fetch_page")
-    def test_fallback_mode_both_fail(self, mock_fetch, mock_predict):
-        """fallback 模式: 两个来源都失败"""
-        mock_fetch.side_effect = [_mock_autohome_soup(), None]
-
-        result = scrape_oil_prices("fallback")
+        result = scrape_oil_prices()
 
         assert result.adjustment is None
-        assert result.prediction is None
+        assert len(result.prices) > 0
 
     @patch("oilprice.scraper.fetch_page")
     def test_autohome_failure_raises(self, mock_fetch):

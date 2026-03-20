@@ -21,9 +21,17 @@ class TestFormatMessage:
         """消息中包含调价信息及来源标识"""
         _, desc = format_message(sample_oil_data, "广东")
 
-        assert "3月20日" in desc
-        assert "上涨" in desc
+        assert "3月23日" in desc
+        assert "上调" in desc
         assert "来源:汽油价格网" in desc
+
+    def test_adjustment_before_price(self, sample_oil_data):
+        """调价预测在油价之前展示"""
+        _, desc = format_message(sample_oil_data, "广东")
+
+        adj_pos = desc.index("📢")
+        price_pos = desc.index("📍")
+        assert adj_pos < price_pos
 
     def test_format_without_adjustment(self, sample_oil_data_no_adjustment):
         """无调价信息时不报错"""
@@ -40,56 +48,36 @@ class TestFormatMessage:
         assert "全国" in title
         assert "未找到" in desc
 
-    def test_format_price_comparison(self, sample_oil_data):
-        """消息中包含全国最低/最高油价"""
+    def test_no_national_comparison(self, sample_oil_data):
+        """不包含全国油价对比"""
         _, desc = format_message(sample_oil_data, "广东")
 
-        assert "最低" in desc
-        assert "最高" in desc
-        assert "新疆" in desc  # 92# 最低
-        assert "海南" in desc  # 92# 最高
+        assert "最低" not in desc
+        assert "最高" not in desc
 
     def test_format_with_prediction(self, sample_prices):
-        """消息中包含自定义算法预测及来源标识"""
-        from oilprice.scraper import AdjustmentInfo, OilPriceData
-
-        prediction = AdjustmentInfo(
-            summary="下次油价4月1日24时调整",
-            detail="国际油价呈上涨趋势，预计油价上调约0.10元/升",
-        )
-        data = OilPriceData(
-            prices=sample_prices, adjustment=None, prediction=prediction
-        )
-        _, desc = format_message(data, "广东")
-
-        assert "🔮" in desc
-        assert "4月1日" in desc
-        assert "上涨" in desc
-        assert "来源:算法预测" in desc
-
-    def test_format_with_both(self, sample_prices):
-        """同时包含调价信息和自定义预测，各有来源标识"""
+        """消息中包含调价信息及来源标识"""
         from oilprice.scraper import AdjustmentInfo, OilPriceData
 
         adjustment = AdjustmentInfo(
-            summary="下次油价3月20日24时调整",
-            detail="油价上涨0.55元/升",
-        )
-        prediction = AdjustmentInfo(
-            summary="下次油价3月20日24时调整",
-            detail="国际油价呈上涨趋势，预计油价上调约0.10元/升",
+            summary="下次油价3月23日24时调整",
+            detail="目前预计上调油价1900元/吨(1.44元/升-1.72元/升)",
         )
         data = OilPriceData(
-            prices=sample_prices, adjustment=adjustment, prediction=prediction
+            prices=sample_prices, adjustment=adjustment,
         )
         _, desc = format_message(data, "广东")
 
         assert "📢" in desc
-        assert "🔮" in desc
-        assert "0.55" in desc
-        assert "国际油价" in desc
+        assert "3月23日" in desc
+        assert "上调" in desc
         assert "来源:汽油价格网" in desc
-        assert "来源:算法预测" in desc
+
+    def test_html_tags_in_description(self, sample_oil_data):
+        """描述内容使用企业微信 text_card HTML 标签"""
+        _, desc = format_message(sample_oil_data, "广东")
+
+        assert "<div" in desc
 
 
 class TestGetProvinceCn:

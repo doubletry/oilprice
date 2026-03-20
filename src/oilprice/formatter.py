@@ -30,53 +30,24 @@ def format_message(data: OilPriceData, province: str) -> tuple[str, str]:
     else:
         title = f"⛽ 全国今日油价 ({today})"
 
-    # 构建描述内容
+    # 构建描述内容（企业微信 text_card 支持简单 HTML）
     lines = []
+
+    # 油价调整预测（优先展示）
+    if data.adjustment:
+        lines.append(f"<div class=\"highlight\">📢 {data.adjustment.summary}</div>")
+        lines.append(f"<div class=\"normal\">{data.adjustment.detail}</div>")
+        lines.append("<div class=\"gray\">来源:汽油价格网</div>")
 
     # 本省油价
     if target_price:
-        lines.append(f"📍 {province}油价")
-        lines.append(f"  92#汽油: {target_price.price_92} 元/升")
-        lines.append(f"  95#汽油: {target_price.price_95} 元/升")
-        lines.append(f"  98#汽油: {target_price.price_98} 元/升")
-        lines.append(f"  0#柴油: {target_price.price_0} 元/升")
-    else:
-        # 未找到指定省份，显示提示
-        lines.append(f"⚠️ 未找到 {province} 的油价数据")
-
-    # 油价调整信息（来自汽油价格网）
-    if data.adjustment:
-        lines.append("")
-        lines.append(f"📢 {data.adjustment.summary}")
-        lines.append(f"  {data.adjustment.detail}")
-        lines.append("  (来源:汽油价格网)")
-
-    # 自定义算法预测（来自国际油价分析）
-    if data.prediction:
-        lines.append("")
-        lines.append(f"🔮 {data.prediction.summary}")
-        lines.append(f"  {data.prediction.detail}")
-        lines.append("  (来源:算法预测)")
-
-    # 全国油价对比（显示最低和最高）
-    if len(data.prices) > 1:
-        prices_92 = []
-        for p in data.prices:
-            try:
-                val = float(p.price_92)
-                prices_92.append((p.province, val))
-            except ValueError:
-                continue
-
-        if prices_92:
-            prices_92.sort(key=lambda x: x[1])
-            cheapest = prices_92[0]
-            most_expensive = prices_92[-1]
+        if lines:
             lines.append("")
-            lines.append(
-                f"📊 全国92#: 最低 {cheapest[0]} {cheapest[1]:.2f}"
-                f" | 最高 {most_expensive[0]} {most_expensive[1]:.2f}"
-            )
+        lines.append(f"<div class=\"normal\">📍 {province}油价</div>")
+        lines.append(f"<div class=\"normal\">92#: {target_price.price_92}  95#: {target_price.price_95}</div>")
+        lines.append(f"<div class=\"normal\">98#: {target_price.price_98}  0#柴油: {target_price.price_0}</div>")
+    else:
+        lines.append(f"<div class=\"normal\">⚠️ 未找到 {province} 的油价数据</div>")
 
     description = "\n".join(lines)
     return title, description

@@ -55,7 +55,6 @@ class OilPriceData:
 
     prices: list[OilPrice]  # 各省份油价列表
     adjustment: AdjustmentInfo | None  # 来自汽油价格网的调价信息
-    prediction: AdjustmentInfo | None = None  # 来自自定义算法的调价预测
 
 
 def fetch_page(url: str) -> BeautifulSoup | None:
@@ -119,7 +118,11 @@ def parse_prices_from_autohome(soup: BeautifulSoup) -> list[OilPrice]:
 def parse_adjustment_from_qiyoujiage(soup: BeautifulSoup) -> AdjustmentInfo | None:
     """从汽油价格网解析油价调整预测信息
 
-    解析 #rightTop 或 #all 区域中的调价通知文本
+    解析 #all / #rightTop / #left 区域中的调价通知文本。
+    兼容多种历史格式:
+    - 新格式: "目前预计上调油价1900元/吨(1.44元/升-1.72元/升)"
+    - 旧格式: "油价上涨0.55元/升-0.67元/升(每吨汽柴油价格分别上调695元和670元)"
+    - 搁浅: "目前预计油价搁浅不调整" / "油价不调整"
 
     Args:
         soup: 汽油价格网页面的 BeautifulSoup 对象
@@ -141,16 +144,10 @@ def parse_adjustment_from_qiyoujiage(soup: BeautifulSoup) -> AdjustmentInfo | No
         date_match = re.search(r"(下次油价\S+调整)", text)
         summary = date_match.group(1) if date_match else ""
 
-        # 提取涨跌信息: "油价上涨/下跌X.XX元/升"
-        change_match = re.search(
-            r"(油价(?:上涨|下跌|不调整)\S*(?:元/升\S*)?(?:\([^)]*\))?)", text
-        )
-        detail = change_match.group(1) if change_match else ""
+        # 提取调价幅度（按优先级尝试多种格式）
+        detail = _extract_adjustment_detail(text)
 
         if summary or detail:
-            # 如果只获取到部分信息，尝试合并
-            if not summary and not detail:
-                continue
             return AdjustmentInfo(
                 summary=summary or "调价日期未知",
                 detail=detail or "调价幅度未知",
@@ -160,38 +157,50 @@ def parse_adjustment_from_qiyoujiage(soup: BeautifulSoup) -> AdjustmentInfo | No
     return None
 
 
-def _try_generate_prediction() -> AdjustmentInfo | None:
-    """尝试使用自定义算法生成调价预测
+def _extract_adjustment_detail(text: str) -> str:
+    """从文本中提取油价调价幅度详情
 
-    Returns:
-        调价预测信息，失败返回 None
-    """
-    logger.info("正在使用自定义算法生成调价预测...")
-    try:
-        from .prediction import generate_prediction
-
-        prediction = generate_prediction()
-        if prediction:
-            logger.info(
-                f"自动生成调价预测: {prediction.summary} {prediction.detail}"
-            )
-        return prediction
-    except Exception as e:
-        logger.warning(f"自动生成调价预测失败: {e}")
-        return None
-
-
-def scrape_oil_prices(prediction_mode: str = "fallback") -> OilPriceData:
-    """抓取完整的油价数据
-
-    从汽车之家获取实时油价，根据 prediction_mode 决定调价预测的获取方式。
+    按优先级依次尝试匹配:
+    1. 预计上调/下调油价XXX元/吨(X.XX元/升-X.XX元/升)
+    2. 预计油价搁浅/不调整
+    3. 油价上涨/下跌X.XX元/升...(每吨...)
+    4. 油价不调整
+    5. 兜底: "调整"后到标点之间含价格关键词的文本
 
     Args:
-        prediction_mode: 预测模式
-            - "qiyoujiage": 仅使用汽油价格网
-            - "custom": 仅使用自定义算法（基于国际油价）
-            - "fallback": 优先汽油价格网，失败时用自定义算法（默认）
-            - "both": 同时获取两个来源
+        text: 页面文本
+
+    Returns:
+        调价幅度描述，未匹配返回空字符串
+    """
+    patterns = [
+        # 新格式: "目前预计上调油价1900元/吨(1.44元/升-1.72元/升)"
+        r"((?:目前)?预计[上下]调油价\d+元/吨(?:\([^)]*\))?)",
+        # 搁浅: "目前预计油价搁浅不调整(搁浅)"
+        r"((?:目前)?预计油价(?:搁浅)?不?调整(?:\([^)]*\))?)",
+        # 旧格式: "油价上涨0.55元/升-0.67元/升(每吨汽柴油价格分别上调695元和670元)"
+        r"(油价(?:上涨|下跌)\d+\.?\d*元/升[^，。）]*(?:\([^)]*\))?)",
+        # 纯文字: "油价不调整"
+        r"(油价不调整)",
+        # 兜底: "调整"后到标点之间含价格单位的文本
+        r"(?:调整\s*)((?:目前)?[^，。]+(?:元/吨|元/升|搁浅|不调整)[^，。]*)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def _try_generate_prediction() -> AdjustmentInfo | None:
+    """[Deprecated] 已废弃，保留以兼容旧代码"""
+    return None
+
+
+def scrape_oil_prices() -> OilPriceData:
+    """抓取完整的油价数据
+
+    从汽车之家获取实时油价，从汽油价格网获取调价预测。
 
     Returns:
         OilPriceData 完整油价数据
@@ -212,31 +221,17 @@ def scrape_oil_prices(prediction_mode: str = "fallback") -> OilPriceData:
     logger.info(f"成功获取 {len(prices)} 个省份的油价数据")
 
     adjustment = None
-    prediction = None
 
-    # 2. 根据模式获取调价预测
-    # 需要从汽油价格网获取的模式
-    if prediction_mode in ("qiyoujiage", "fallback", "both"):
-        logger.info("正在从汽油价格网获取调价预测信息...")
-        qiyoujiage_soup = fetch_page(QIYOUJIAGE_URL)
-        if qiyoujiage_soup:
-            adjustment = parse_adjustment_from_qiyoujiage(qiyoujiage_soup)
-            if adjustment:
-                logger.info(f"调价信息: {adjustment.summary} {adjustment.detail}")
-            else:
-                logger.warning("未能获取调价预测信息")
+    # 2. 从汽油价格网获取调价预测
+    logger.info("正在从汽油价格网获取调价预测信息...")
+    qiyoujiage_soup = fetch_page(QIYOUJIAGE_URL)
+    if qiyoujiage_soup:
+        adjustment = parse_adjustment_from_qiyoujiage(qiyoujiage_soup)
+        if adjustment:
+            logger.info(f"调价信息: {adjustment.summary} {adjustment.detail}")
         else:
-            logger.warning("无法访问汽油价格网")
+            logger.warning("未能获取调价预测信息")
+    else:
+        logger.warning("无法访问汽油价格网")
 
-    # 需要使用自定义算法的模式
-    if prediction_mode == "custom":
-        prediction = _try_generate_prediction()
-
-    elif prediction_mode == "both":
-        prediction = _try_generate_prediction()
-
-    elif prediction_mode == "fallback" and adjustment is None:
-        # 汽油价格网失败时，回退到自定义算法
-        prediction = _try_generate_prediction()
-
-    return OilPriceData(prices=prices, adjustment=adjustment, prediction=prediction)
+    return OilPriceData(prices=prices, adjustment=adjustment)

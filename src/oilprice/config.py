@@ -17,7 +17,6 @@ class Config:
     agent_id: str
     user_ids: list[str]
     province: str = "guangdong"
-    prediction_mode: str = "fallback"
 
 
 def load_config(env_path: str | None = None) -> Config:
@@ -62,21 +61,10 @@ def load_config(env_path: str | None = None) -> Config:
     user_ids = [uid.strip() for uid in user_ids_str.split(",") if uid.strip()]
     province = os.getenv("PROVINCE", "guangdong").strip()
 
-    # 预测模式: qiyoujiage / custom / fallback / both
-    prediction_mode = os.getenv("PREDICTION_MODE", "fallback").strip().lower()
-    valid_modes = ("qiyoujiage", "custom", "fallback", "both")
-    if prediction_mode not in valid_modes:
-        logger.warning(
-            f"无效的 PREDICTION_MODE: {prediction_mode}，"
-            f"可选值: {', '.join(valid_modes)}，已回退为 fallback"
-        )
-        prediction_mode = "fallback"
-
     return Config(
         corp_id=corp_id,
         secret=secret,
         agent_id=agent_id,
         user_ids=user_ids,
         province=province,
-        prediction_mode=prediction_mode,
     )
