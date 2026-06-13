@@ -5,9 +5,9 @@
 ## 功能特性
 
 - **实时油价查询** — 从汽车之家获取全国 31 个省份的 92#、95#、98# 汽油及 0# 柴油价格
-- **油价调整预测** — 从汽油价格网获取下次调价日期和预计涨跌幅度
-- **算法预测** — 基于完整定价链算法，结合国际原油价格、汇率、炼油成本和税费，独立计算预计零售价变动
-- **多数据源支持** — 优先使用 Yahoo Finance 获取国际原油历史 K 线数据，新浪财经作为备用数据源
+- **多数据源调价预测** — 按优先级从汽油价格网、汽车之家、金投网获取调价预测，支持口语化日期解析（今晚、明晚、明天 等）
+- **智能回退策略** — 所有外部数据源都失败时，自动使用基于国际油价的定价链算法生成兜底预测
+- **多数据源 K 线支持** — 优先使用 Yahoo Finance 获取国际原油历史 K 线数据，新浪财经作为备用数据源
 - **企业微信推送** — 通过企业微信应用以文本卡片形式推送到个人微信
 - **全国对比** — 展示 92# 汽油全国最高/最低价格省份
 
@@ -15,10 +15,20 @@
 
 | 数据源 | 网站 | 用途 |
 |--------|------|------|
-| 汽车之家 | [autohome.com.cn/oil](https://www.autohome.com.cn/oil/) | 全国各省实时油价（主数据源） |
-| 汽油价格网 | [qiyoujiage.com](http://www.qiyoujiage.com/) | 油价调整预测信息（补充数据源） |
+| 汽车之家 | [autohome.com.cn/oil](https://www.autohome.com.cn/oil/) | 全国各省实时油价 + 调价预测 |
+| 汽油价格网 | [qiyoujiage.com](http://www.qiyoujiage.com/) | 油价调整预测信息（支持口语化日期） |
+| 金投网 | [cngold.org](https://www.cngold.org/) | 油价调整预测信息（备选数据源） |
 | Yahoo Finance | [finance.yahoo.com](https://finance.yahoo.com/) | 国际原油历史 K 线数据（算法预测主数据源） |
 | 新浪财经 | [finance.sina.com.cn](https://finance.sina.com.cn/) | 国际原油实时行情、K 线数据（备用）、美元兑人民币汇率 |
+
+### 调价预测数据获取策略
+
+调价预测信息按以下优先级依次获取，第一个成功即返回：
+
+1. **汽油价格网** — 支持口语化日期解析（今晚/明晚/昨晚/明天/后天 等）
+2. **汽车之家** — 油价页面中的调价预测
+3. **金投网** — 成品油调价信息
+4. **自研计算模型（兜底）** — 基于国际油价定价链算法生成，摘要前缀标记 `[计算]`
 
 ## 环境要求
 
@@ -116,27 +126,31 @@ poetry run python -m oilprice --env /path/to/.env
 
 ```
 src/oilprice/
-├── __init__.py      # 包入口
-├── __main__.py      # python -m oilprice 支持
-├── main.py          # CLI 入口和主流程
-├── config.py        # .env 配置加载
-├── scraper.py       # 油价数据抓取与解析
-├── prediction.py    # 国际油价获取与算法预测（定价链计算）
-├── formatter.py     # 消息内容格式化（含来源标签）
-└── notifier.py      # 企业微信消息推送
+├── __init__.py              # 包入口
+├── __main__.py              # python -m oilprice 支持
+├── main.py                  # CLI 入口和主流程
+├── config.py                # .env 配置加载
+├── scraper.py               # 油价数据抓取与主流程
+├── date_resolver.py         # 口语化日期解析（今晚/明晚/明天 等）
+├── adjustment_provider.py   # 多数据源调价预测框架（Provider 接口 + 管理器）
+├── prediction.py            # 国际油价获取与算法预测（定价链计算，兜底方案）
+├── formatter.py             # 消息内容格式化（含来源标签）
+└── notifier.py              # 企业微信消息推送
 
 tests/
-├── conftest.py       # 测试 fixtures 和模拟数据
-├── test_config.py    # 配置模块测试
-├── test_scraper.py   # 抓取模块测试
-├── test_prediction.py # 预测模块测试
-├── test_formatter.py # 格式化模块测试
-└── test_notifier.py  # 通知模块测试
+├── conftest.py               # 测试 fixtures 和模拟数据
+├── test_config.py            # 配置模块测试
+├── test_scraper.py           # 抓取模块测试
+├── test_date_resolver.py     # 口语化日期解析测试
+├── test_adjustment_provider.py # 多数据源框架测试
+├── test_prediction.py        # 预测模块测试
+├── test_formatter.py         # 格式化模块测试
+└── test_notifier.py          # 通知模块测试
 ```
 
-## 算法预测说明
+## 算法预测说明（兜底方案）
 
-本工具内置完整的中国成品油定价链算法，基于国际原油价格独立计算预计零售价变动：
+当所有外部数据源（汽油价格网、汽车之家、金投网）都失败时，系统自动使用内置的定价链算法生成兜底预测。结果摘要前缀标记 `[计算]`，方便区分数据来源。
 
 ```
 国际原油价格(美元/桶) → 汇率转换 → 原油成本(元/吨) → 炼油加工 → 税费 → 零售价(元/升)

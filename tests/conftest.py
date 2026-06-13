@@ -119,3 +119,47 @@ QIYOUJIAGE_HTML_OLD_DOWN = """
 </body>
 </html>
 """
+
+# 口语化日期格式：今晚
+QIYOUJIAGE_HTML_TONIGHT = """
+<html>
+<body>
+<div id="all">
+  油价今晚24时调整 目前预计下调270元/吨(0.21元/升-0.24元/升)，大家相互转告油价继续下跌。
+</div>
+</body>
+</html>
+"""
+
+# 口语化日期格式：明天
+QIYOUJIAGE_HTML_TOMORROW = """
+<html>
+<body>
+<div id="all">
+  油价明天调整 目前预计上调油价100元/吨(0.08元/升-0.09元/升)
+</div>
+</body>
+</html>
+"""
+
+# 口语化日期格式：昨晚
+QIYOUJIAGE_HTML_LAST_NIGHT = """
+<html>
+<body>
+<div id="all">
+  油价昨晚24时调整 目前预计下调油价150元/吨
+</div>
+</body>
+</html>
+"""
+
+# 口语化日期格式：后天
+QIYOUJIAGE_HTML_DAY_AFTER_TOMORROW = """
+<html>
+<body>
+<div id="all">
+  油价后天调整 目前预计油价搁浅不调整
+</div>
+</body>
+</html>
+"""

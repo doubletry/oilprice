@@ -200,7 +200,11 @@ def _try_generate_prediction() -> AdjustmentInfo | None:
 def scrape_oil_prices() -> OilPriceData:
     """抓取完整的油价数据
 
-    从汽车之家获取实时油价，从汽油价格网获取调价预测。
+    数据获取策略（按优先级）:
+    1. 汽车之家: 获取全国各省实时油价
+    2. 多数据源回退: 通过 ProviderManager 按优先级从多个网站获取调价预测
+       - 汽油价格网 → 汽车之家 → 金投网
+    3. 自研计算兜底: 所有外部数据源都失败时，使用国际油价计算模型生成预测
 
     Returns:
         OilPriceData 完整油价数据
@@ -220,18 +224,48 @@ def scrape_oil_prices() -> OilPriceData:
 
     logger.info(f"成功获取 {len(prices)} 个省份的油价数据")
 
-    adjustment = None
+    # 2. 通过多数据源框架获取调价预测
+    adjustment = _fetch_adjustment_with_fallback()
 
-    # 2. 从汽油价格网获取调价预测
-    logger.info("正在从汽油价格网获取调价预测信息...")
-    qiyoujiage_soup = fetch_page(QIYOUJIAGE_URL)
-    if qiyoujiage_soup:
-        adjustment = parse_adjustment_from_qiyoujiage(qiyoujiage_soup)
+    return OilPriceData(prices=prices, adjustment=adjustment)
+
+
+def _fetch_adjustment_with_fallback() -> AdjustmentInfo | None:
+    """按优先级从多个数据源获取调价信息
+
+    优先级:
+    1. 外部数据源（汽油价格网 → 汽车之家 → 金投网）
+    2. 自研计算模型（兜底方案）
+
+    Returns:
+        AdjustmentInfo 或 None（全部失败时）
+    """
+    # 尝试外部数据源
+    try:
+        from .adjustment_provider import ProviderManager
+
+        manager = ProviderManager()
+        adjustment = manager.fetch()
         if adjustment:
-            logger.info(f"调价信息: {adjustment.summary} {adjustment.detail}")
-        else:
-            logger.warning("未能获取调价预测信息")
-    else:
-        logger.warning("无法访问汽油价格网")
+            return adjustment
+    except Exception:
+        logger.exception("多数据源框架异常")
+
+    # 所有外部数据源都失败，使用自研计算模型兜底
+    logger.warning("所有外部数据源均失败，尝试使用自研计算模型兜底...")
+    try:
+        from .prediction import generate_prediction
+
+        adjustment = generate_prediction()
+        if adjustment:
+            # 标记为自研计算结果
+            adjustment.summary = f"[计算] {adjustment.summary}"
+            logger.info(f"自研计算兜底: {adjustment.summary} | {adjustment.detail}")
+            return adjustment
+    except Exception:
+        logger.exception("自研计算模型异常")
+
+    logger.error("所有数据源（含自研计算）均未能获取调价信息")
+    return None
 
     return OilPriceData(prices=prices, adjustment=adjustment)

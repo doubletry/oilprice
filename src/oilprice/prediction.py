@@ -479,6 +479,66 @@ def _fetch_kline_data(symbol: str, name: str) -> list | None:
     return None
 
 
+def _parse_flexible_date(date_str: str) -> date | None:
+    """灵活的日期解析，支持多种格式
+
+    支持:
+    - ISO 格式: "2025-01-17"
+    - 带时间的 ISO: "2025-01-17T00:00:00"
+    - Unix 时间戳（秒或毫秒）
+    - 中文格式: "2025年1月17日"
+
+    Args:
+        date_str: 日期字符串
+
+    Returns:
+        date 对象，解析失败返回 None
+    """
+    if not date_str:
+        return None
+
+    date_str = str(date_str).strip()
+
+    # 1. ISO 格式 "YYYY-MM-DD"
+    try:
+        return date.fromisoformat(date_str)
+    except ValueError:
+        pass
+
+    # 2. 带时间的 ISO 格式 "YYYY-MM-DDTHH:MM:SS"
+    try:
+        from datetime import datetime
+
+        dt = datetime.fromisoformat(date_str)
+        return dt.date()
+    except (ValueError, TypeError):
+        pass
+
+    # 3. Unix 时间戳（秒或毫秒）
+    try:
+        ts = int(date_str)
+        if ts > 1e12:  # 毫秒时间戳
+            ts = ts // 1000
+        if 1_000_000_000 < ts < 2_000_000_000:  # 合理范围 2001-2033
+            from datetime import datetime, timezone
+
+            return datetime.fromtimestamp(ts, tz=timezone.utc).date()
+    except (ValueError, OSError):
+        pass
+
+    # 4. 中文格式 "YYYY年M月D日"
+    import re
+
+    m = re.match(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?", date_str)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            pass
+
+    return None
+
+
 def _find_closest_price(
     data: list, ref_date: date, name: str, max_diff_days: int = 5
 ) -> float | None:
@@ -495,6 +555,7 @@ def _find_closest_price(
     """
     best_price = None
     best_diff = None
+    parse_failures = 0
 
     for entry in data:
         try:
@@ -505,7 +566,7 @@ def _find_closest_price(
                     or entry.get("date")
                     or entry.get("d", "")
                 )
-                close_str = entry.get("close") or entry.get("c", "")
+                close_str = entry.get("close") or entry.get("c", "") or entry.get("price", "")
             elif isinstance(entry, list) and len(entry) >= 5:
                 entry_date_str = str(entry[0])
                 close_str = str(entry[4])
@@ -515,7 +576,11 @@ def _find_closest_price(
             if not entry_date_str or not close_str:
                 continue
 
-            entry_date = date.fromisoformat(entry_date_str)
+            entry_date = _parse_flexible_date(entry_date_str)
+            if entry_date is None:
+                parse_failures += 1
+                continue
+
             close_price = float(close_str)
             diff = abs((entry_date - ref_date).days)
 
@@ -523,11 +588,23 @@ def _find_closest_price(
                 best_diff = diff
                 best_price = close_price
         except (ValueError, TypeError):
-            logger.exception(f"解析{name}K线数据条目失败: {entry}")
+            parse_failures += 1
             continue
 
+    if parse_failures > 0:
+        logger.debug(f"{name} K线数据中有 {parse_failures} 条解析失败")
+
     if best_price is not None and best_diff is not None and best_diff <= max_diff_days:
+        logger.debug(f"{name} 找到最近价格: {best_price} (差距 {best_diff} 天)")
         return best_price
+
+    if best_price is not None:
+        logger.warning(
+            f"{name} 最近价格差距 {best_diff} 天，超过容差 {max_diff_days} 天"
+        )
+    else:
+        logger.warning(f"{name} 未找到任何有效K线数据")
+
     return None
 
 

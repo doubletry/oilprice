@@ -145,22 +145,53 @@ _FAKE_PREDICTION = AdjustmentInfo(
 
 
 class TestScrapeOilPrices:
-    """测试 scrape_oil_prices"""
+    """测试 scrape_oil_prices
 
+    新架构: scrape_oil_prices 使用 ProviderManager 获取调价信息，
+    所有外部数据源都失败时才使用自研计算模型兜底。
+    """
+
+    @patch("oilprice.adjustment_provider.ProviderManager.fetch")
     @patch("oilprice.scraper.fetch_page")
-    def test_normal_flow(self, mock_fetch):
+    def test_normal_flow(self, mock_fetch, mock_pm_fetch):
         """正常流程: 获取油价和调价信息"""
-        mock_fetch.side_effect = [_mock_autohome_soup(), _mock_qiyoujiage_soup()]
+        mock_fetch.return_value = _mock_autohome_soup()
+        mock_pm_fetch.return_value = AdjustmentInfo(
+            summary="下次油价6月18日24时调整",
+            detail="预计下调270元/吨(0.21元/升-0.24元/升)",
+        )
 
         result = scrape_oil_prices()
 
         assert result.adjustment is not None
         assert len(result.prices) > 0
 
+    @patch("oilprice.prediction.generate_prediction")
+    @patch("oilprice.adjustment_provider.ProviderManager.fetch")
     @patch("oilprice.scraper.fetch_page")
-    def test_qiyoujiage_unavailable(self, mock_fetch):
-        """汽油价格网不可用时仅返回油价"""
-        mock_fetch.side_effect = [_mock_autohome_soup(), None]
+    def test_all_providers_fail_uses_prediction(self, mock_fetch, mock_pm_fetch, mock_pred):
+        """所有外部数据源失败时，使用自研计算模型兜底"""
+        mock_fetch.return_value = _mock_autohome_soup()
+        mock_pm_fetch.return_value = None
+        mock_pred.return_value = AdjustmentInfo(
+            summary="下次油价6月30日24时调整",
+            detail="国际油价呈上涨趋势",
+        )
+
+        result = scrape_oil_prices()
+
+        assert result.adjustment is not None
+        assert "[计算]" in result.adjustment.summary
+        assert len(result.prices) > 0
+
+    @patch("oilprice.prediction.generate_prediction")
+    @patch("oilprice.adjustment_provider.ProviderManager.fetch")
+    @patch("oilprice.scraper.fetch_page")
+    def test_all_sources_fail(self, mock_fetch, mock_pm_fetch, mock_pred):
+        """所有数据源（含自研计算）都失败时，adjustment 为 None"""
+        mock_fetch.return_value = _mock_autohome_soup()
+        mock_pm_fetch.return_value = None
+        mock_pred.return_value = None
 
         result = scrape_oil_prices()
 
